@@ -13,6 +13,12 @@ Used for:
 3. check_dash_chain(idx, checkpoints) -- checkpoint-chain mode for the dash-orb level
 
 Run as a script for a quick full-levels report, or import the functions.
+
+Note: this checker only covers grid-based (mode-less/maze) levels -- its
+load_levels() regex requires a literal `grid:` key, so World 2's runner-mode
+level (LEVELS[7], `mode: 'runner'`, no grid) is silently skipped here, not
+verified by this tool. See tools/runner_solvability_checker.py instead, which
+re-simulates the charge-jump physics model to verify that level.
 """
 import re
 import math

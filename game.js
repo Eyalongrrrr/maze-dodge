@@ -59,6 +59,21 @@ const DASH_DURATION = 0.4;
 const DASH_SPEED_MUL = 3.5;
 const DASH_INVULN_BUFFER = 0.2;
 
+// Runner-mode (World 2) charge-jump physics. Keep these in sync with
+// tools/runner_solvability_checker.py -- that tool re-simulates this exact
+// model in Python to prove every authored obstacle is clearable.
+const RUNNER_PLAYER_X = 160;
+const RUNNER_GROUND_Y = 460;
+const RUNNER_CEILING_Y = 280;
+const RUNNER_GRAVITY = 2200;
+const RUNNER_MIN_JUMP_VEL = 380;
+const RUNNER_MAX_JUMP_VEL = 780;
+const RUNNER_MAX_CHARGE_TIME = 0.55;
+const RUNNER_SCROLL_SPEED = 260;
+const RUNNER_PLAYER_HALF_WIDTH = 9;
+const RUNNER_PLAYER_HEIGHT = 34;
+const RUNNER_SPIKE_WIDTH = 26;
+
 // Leaderboard backend (Supabase PostgREST) -- this is the ONLY part of Maze Dodge
 // that ever talks to a network. Left blank until configured; every call below
 // checks for that and no-ops instead of attempting a request, so the game stays
@@ -91,6 +106,7 @@ const ORB_TRAIL_SPACING = 8;
 const ORB_PULSE_SPEED = 500;
 
 const IDLE_ANIM = { facing: { x: 0, y: 1 }, isMoving: false, animPhase: 0 };
+const RUNNER_ANIM = { facing: { x: 1, y: 0 }, isMoving: false, animPhase: 0 };
 
 const NODE_RADIUS = 24;
 const WORLD_PATH = [
@@ -102,6 +118,26 @@ const WORLD_PATH = [
   { x: 660, y: 160 },
   { x: 740, y: 90 },
 ];
+
+// A second, single-node world (see LEVELS[7] below). LEVELS/progress stay one
+// flat array/shape -- WORLDS is a thin view on top that maps a contiguous
+// LEVELS index range to its own map/theme/node path. World unlocking is a
+// pure byproduct of the existing flat progress.unlockedIndex gate; no new
+// unlock logic needed.
+const CAVERN_PATH = [{ x: 400, y: 300 }];
+
+const WORLDS = [
+  { name: 'The Mountain Road', theme: 'mountain', startIndex: 0, path: WORLD_PATH },
+  { name: 'The Deep Cavern', theme: 'cavern', startIndex: 7, path: CAVERN_PATH },
+];
+
+function worldIndexForLevel(levelIdx) {
+  for (let i = 0; i < WORLDS.length; i++) {
+    const w = WORLDS[i];
+    if (levelIdx >= w.startIndex && levelIdx < w.startIndex + w.path.length) return i;
+  }
+  return 0;
+}
 
 const PROGRESS_KEY = 'mazeDodgeProgress';
 
@@ -319,6 +355,29 @@ const LEVELS = [
       { x: 240, y: 380 },
     ],
   },
+  {
+    name: 'The Long Drop',
+    flavorText: 'A ledge over the dark below -- hold to jump higher, tap for a quick hop.',
+    mode: 'runner',
+    // See RUNNER_* constants above and tools/runner_solvability_checker.py --
+    // every obstacle here is verified to have a valid hold-duration that
+    // clears it, and consecutive obstacles are spaced with enough scroll-time
+    // for a full-charge jump's time-of-flight plus a reaction buffer.
+    // A `ceiling` field is only ever paired with a small ground.height,
+    // per spec: a short ground spike gets a spike hanging above it too,
+    // turning the easy-looking short hop into a precise one.
+    gauntlet: {
+      length: 2600,
+      obstacles: [
+        { gaugeX: 500, ground: { height: 50 } },
+        { gaugeX: 850, ground: { height: 80 } },
+        { gaugeX: 1150, ground: { height: 30 }, ceiling: { height: 96 } },
+        { gaugeX: 1500, ground: { height: 65 } },
+        { gaugeX: 1800, ground: { height: 32 }, ceiling: { height: 92 } },
+        { gaugeX: 2150, ground: { height: 90 } },
+      ],
+    },
+  },
 ];
 
 function ensureProgressShape(p) {
@@ -367,6 +426,12 @@ function saveProgress() {
 let progress = loadProgress();
 let username = localStorage.getItem(USERNAME_KEY) || '';
 
+// Which world's map is currently displayed. Defaults to the player's frontier
+// world but stays put once the player manually browses to the other one (so
+// mopping up missed gems on an earlier world doesn't get yanked back) --
+// finishLevel() advances it automatically the moment a *new* world unlocks.
+let viewedWorldIndex = worldIndexForLevel(Math.min(progress.unlockedIndex, LEVELS.length - 1));
+
 const player = { x: 0, y: 0, radius: PLAYER_RADIUS, facingX: 0, facingY: 1, isMoving: false, animPhase: 0 };
 let walls = [];
 let hazards = [];
@@ -379,6 +444,17 @@ let dashDirX = 0;
 let dashDirY = 0;
 let exitZone = null;
 let currentLevelIndex = 0;
+
+// Runner-mode-only state (LEVELS[i].mode === 'runner') -- entirely separate
+// from walls/hazards/player.x,y so the maze engine (tryAxis, parseLevel,
+// createHazard/updateHazard) is never invoked for a runner level.
+let runnerScroll = 0;
+let runnerHeight = 0;
+let runnerVelY = 0;
+let runnerGrounded = true;
+let runnerCharging = false;
+let runnerChargeTime = 0;
+
 let lives = LIVES_PER_ATTEMPT;
 let invulnTimer = 0;
 let resultPauseTimer = 0;
@@ -439,14 +515,16 @@ function canvasCoords(e) {
 canvas.addEventListener('mousemove', (e) => {
   if (phase !== Phase.MENU) return;
   const { x: mx, y: my } = canvasCoords(e);
-  menuHoverIndex = nodeIndexAt(mx, my);
+  menuHoverIndex = nodeIndexAt(mx, my, WORLDS[viewedWorldIndex]);
 });
 
 canvas.addEventListener('click', (e) => {
   const { x: mx, y: my } = canvasCoords(e);
 
   if (phase === Phase.MENU) {
-    const idx = nodeIndexAt(mx, my);
+    const sw = worldSwitchHitTest(mx, my);
+    if (sw !== 0) { switchViewedWorld(sw); return; }
+    const idx = nodeIndexAt(mx, my, WORLDS[viewedWorldIndex]);
     if (idx === -1) return;
     if (idx <= progress.unlockedIndex) enterLevel(idx);
     return;
@@ -480,14 +558,38 @@ exitToMapBtn.addEventListener('click', () => {
   returnToMenu(null);
 });
 
-function nodeIndexAt(mx, my) {
-  for (let i = 0; i < WORLD_PATH.length; i++) {
-    const n = WORLD_PATH[i];
+function nodeIndexAt(mx, my, world) {
+  for (let i = 0; i < world.path.length; i++) {
+    const n = world.path[i];
     const dx = mx - n.x;
     const dy = my - n.y;
-    if (dx * dx + dy * dy <= NODE_RADIUS * NODE_RADIUS) return i;
+    if (dx * dx + dy * dy <= NODE_RADIUS * NODE_RADIUS) return world.startIndex + i;
   }
   return -1;
+}
+
+const WORLD_ARROW_Y = 46;
+const WORLD_ARROW_MARGIN = 30;
+const WORLD_ARROW_RADIUS = 16;
+
+function canViewWorld(i) {
+  if (i < 0 || i >= WORLDS.length) return false;
+  return WORLDS[i].startIndex <= progress.unlockedIndex;
+}
+
+function worldSwitchHitTest(mx, my) {
+  if (Math.abs(my - WORLD_ARROW_Y) > WORLD_ARROW_RADIUS) return 0;
+  if (canViewWorld(viewedWorldIndex - 1) && Math.abs(mx - WORLD_ARROW_MARGIN) <= WORLD_ARROW_RADIUS) return -1;
+  if (canViewWorld(viewedWorldIndex + 1) && Math.abs(mx - (canvas.width - WORLD_ARROW_MARGIN)) <= WORLD_ARROW_RADIUS) return 1;
+  return 0;
+}
+
+function switchViewedWorld(dir) {
+  const next = viewedWorldIndex + dir;
+  if (canViewWorld(next)) {
+    viewedWorldIndex = next;
+    menuHoverIndex = -1;
+  }
 }
 
 function circlesOverlap(a, b) {
@@ -719,6 +821,86 @@ function buildMapBackground() {
   mapBackgroundCanvas = off;
 }
 
+// World 2's background reuses the mountain map's ridgeline technique
+// (hashCell/generateRidgeline/drawRidgeLayer are already seed+palette
+// parameterized) with a dark cavern palette in place of sky/river/pines.
+// A single-node world has no river and nothing to connect a trail between,
+// so drawRiver/drawTrail are deliberately skipped here, not forgotten.
+const CAVERN_LAYERS = [
+  { baseY: 200, amplitude: 40, color: '#2a2438', snow: 0 },
+  { baseY: 250, amplitude: 55, color: '#221c30', snow: 0 },
+  { baseY: 305, amplitude: 68, color: '#1a1526', snow: 0 },
+  { baseY: 365, amplitude: 85, color: '#120e1c', snow: 0 },
+];
+const CAVE_FLOOR_TOP = '#1c1626';
+const CAVE_FLOOR_BOTTOM = '#0d0a14';
+const TORCH_GLOW_COLOR = '255,158,66';
+
+function drawCaveGlow(octx) {
+  const bg = octx.createLinearGradient(0, 0, 0, 420);
+  bg.addColorStop(0, '#05060c');
+  bg.addColorStop(1, '#171224');
+  octx.fillStyle = bg;
+  octx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const torchSpots = [{ x: 120, y: 340 }, { x: 420, y: 120 }, { x: 660, y: 260 }];
+  torchSpots.forEach((t) => {
+    const glow = octx.createRadialGradient(t.x, t.y, 0, t.x, t.y, 90);
+    glow.addColorStop(0, `rgba(${TORCH_GLOW_COLOR},0.35)`);
+    glow.addColorStop(1, `rgba(${TORCH_GLOW_COLOR},0)`);
+    octx.fillStyle = glow;
+    octx.beginPath();
+    octx.arc(t.x, t.y, 90, 0, Math.PI * 2);
+    octx.fill();
+  });
+}
+
+function drawCrystalCluster(octx, x, y, size) {
+  octx.save();
+  octx.fillStyle = '#7fd6ff';
+  octx.shadowColor = '#7fd6ff';
+  octx.shadowBlur = 6;
+  for (let i = 0; i < 3; i++) {
+    const w = size * (1 - i * 0.25);
+    const yy = y - i * size * 0.4;
+    octx.globalAlpha = 0.85 - i * 0.15;
+    octx.beginPath();
+    octx.moveTo(x, yy - size * 0.7);
+    octx.lineTo(x - w * 0.4, yy + size * 0.2);
+    octx.lineTo(x + w * 0.4, yy + size * 0.2);
+    octx.closePath();
+    octx.fill();
+  }
+  octx.restore();
+}
+
+let cavernMapBackgroundCanvas = null;
+function buildCavernMapBackground() {
+  const off = document.createElement('canvas');
+  off.width = canvas.width;
+  off.height = canvas.height;
+  const octx = off.getContext('2d');
+
+  drawCaveGlow(octx);
+  CAVERN_LAYERS.forEach((layer, i) => drawRidgeLayer(octx, layer, i + 101));
+
+  const floor = octx.createLinearGradient(0, 400, 0, 600);
+  floor.addColorStop(0, CAVE_FLOOR_TOP);
+  floor.addColorStop(1, CAVE_FLOOR_BOTTOM);
+  octx.fillStyle = floor;
+  octx.fillRect(0, 400, canvas.width, 200);
+
+  for (let i = 0; i < 24; i++) {
+    const x = hashCell(i, 1, 199) * canvas.width;
+    const y = 410 + hashCell(i, 2, 199) * 150;
+    const tooClose = CAVERN_PATH.some((n) => Math.hypot(n.x - x, n.y - y) < 55);
+    if (tooClose) continue;
+    drawCrystalCluster(octx, x, y, 8 + hashCell(i, 4, 199) * 8);
+  }
+
+  cavernMapBackgroundCanvas = off;
+}
+
 function isWallAt(col, row) {
   if (col < 0 || row < 0 || col >= GRID_COLS || row >= GRID_ROWS) return true;
   return walls[row][col];
@@ -806,21 +988,41 @@ function showBanner(text, seconds) {
   bannerTimer = seconds;
 }
 
+function setupRunnerLevel() {
+  player.x = RUNNER_PLAYER_X;
+  player.y = RUNNER_GROUND_Y;
+  hazards = [];
+  dashOrbs = [];
+  dashTimer = 0;
+  runnerScroll = 0;
+  runnerHeight = 0;
+  runnerVelY = 0;
+  runnerGrounded = true;
+  runnerCharging = false;
+  runnerChargeTime = 0;
+  transformAnchor = { x: RUNNER_PLAYER_X, y: RUNNER_GROUND_Y - 14 };
+}
+
 function enterLevel(index) {
   currentLevelIndex = index;
   const levelDef = LEVELS[index];
-  const parsed = parseLevel(levelDef);
-  walls = parsed.isWallGrid;
-  exitZone = { x: parsed.exitPos.x, y: parsed.exitPos.y, radius: CELL_SIZE * 0.35 };
-  player.x = parsed.startPos.x;
-  player.y = parsed.startPos.y;
-  hazards = levelDef.hazards.map((def) => createHazard(def, index));
+  if (levelDef.mode === 'runner') {
+    setupRunnerLevel();
+  } else {
+    const parsed = parseLevel(levelDef);
+    walls = parsed.isWallGrid;
+    exitZone = { x: parsed.exitPos.x, y: parsed.exitPos.y, radius: CELL_SIZE * 0.35 };
+    player.x = parsed.startPos.x;
+    player.y = parsed.startPos.y;
+    hazards = levelDef.hazards.map((def) => createHazard(def, index));
+    dashOrbs = (levelDef.dashOrbs || []).map((def) => ({ x: def.x, y: def.y, radius: DASH_ORB_RADIUS, used: false }));
+    dashTimer = 0;
+    transformAnchor = { x: parsed.startPos.x, y: parsed.startPos.y };
+  }
   collectibles = (levelDef.collectibles || []).map((def, i) => ({
     x: def.x, y: def.y, radius: COLLECTIBLE_RADIUS, index: i,
   }));
   runGemCount = progress.gemsCollected[index].filter(Boolean).length;
-  dashOrbs = (levelDef.dashOrbs || []).map((def) => ({ x: def.x, y: def.y, radius: DASH_ORB_RADIUS, used: false }));
-  dashTimer = 0;
   levelTimer = 0;
   lives = LIVES_PER_ATTEMPT;
   invulnTimer = INVULN_TIME;
@@ -830,7 +1032,6 @@ function enterLevel(index) {
   timeLabel.textContent = 'Time: 0.0s';
   const best = progress.bestTimes[index];
   bestLabel.textContent = best == null ? 'Best: --' : `Best: ${formatTime(best)}`;
-  transformAnchor = { x: parsed.startPos.x, y: parsed.startPos.y };
   transformTimer = 0;
   transformDirection = 1;
   phase = Phase.TRANSFORM_IN;
@@ -839,11 +1040,16 @@ function enterLevel(index) {
 }
 
 function respawnInLevel() {
-  const parsed = parseLevel(LEVELS[currentLevelIndex]);
+  const levelDef = LEVELS[currentLevelIndex];
+  if (levelDef.mode === 'runner') {
+    setupRunnerLevel();
+    invulnTimer = INVULN_TIME;
+    return;
+  }
+  const parsed = parseLevel(levelDef);
   player.x = parsed.startPos.x;
   player.y = parsed.startPos.y;
-  hazards = LEVELS[currentLevelIndex].hazards.map((def) => createHazard(def, currentLevelIndex));
-  const levelDef = LEVELS[currentLevelIndex];
+  hazards = levelDef.hazards.map((def) => createHazard(def, currentLevelIndex));
   dashOrbs = (levelDef.dashOrbs || []).map((def) => ({ x: def.x, y: def.y, radius: DASH_ORB_RADIUS, used: false }));
   dashTimer = 0;
   invulnTimer = INVULN_TIME;
@@ -930,19 +1136,48 @@ function updatePlayerMovement(dt) {
   tryAxis('y', stepY);
 }
 
+// Shared by both the maze hazard path and the runner spike path.
+function loseLife(hitLabel) {
+  lives -= 1;
+  livesLabel.textContent = `Lives: ${Math.max(lives, 0)}`;
+  if (lives > 0) {
+    showBanner(`${hitLabel} Lives left: ${lives}`, BANNER_TIME);
+    respawnInLevel();
+  } else {
+    showBanner('Caught. Falling back...', BANNER_TIME);
+    returnToMenu(null);
+  }
+}
+
 function checkHazardCollisions(dt) {
   if (invulnTimer > 0) { invulnTimer -= dt; return; }
   for (const h of hazards) {
     if (circlesOverlap(player, h)) {
-      lives -= 1;
-      livesLabel.textContent = `Lives: ${Math.max(lives, 0)}`;
-      if (lives > 0) {
-        showBanner(`Caught sight of you! Lives left: ${lives}`, BANNER_TIME);
-        respawnInLevel();
-      } else {
-        showBanner('Caught. Falling back...', BANNER_TIME);
-        returnToMenu(null);
-      }
+      loseLife('Caught sight of you!');
+      return;
+    }
+  }
+}
+
+function checkRunnerCollisions(dt) {
+  if (invulnTimer > 0) { invulnTimer -= dt; return; }
+  const gauntlet = LEVELS[currentLevelIndex].gauntlet;
+  const feetY = RUNNER_GROUND_Y - runnerHeight;
+  const playerLeft = RUNNER_PLAYER_X - RUNNER_PLAYER_HALF_WIDTH;
+  const playerRight = RUNNER_PLAYER_X + RUNNER_PLAYER_HALF_WIDTH;
+  const playerTop = feetY - RUNNER_PLAYER_HEIGHT;
+  const playerBottom = feetY;
+  for (const ob of gauntlet.obstacles) {
+    const screenX = RUNNER_PLAYER_X + (ob.gaugeX - runnerScroll);
+    const spikeLeft = screenX - RUNNER_SPIKE_WIDTH / 2;
+    const spikeRight = screenX + RUNNER_SPIKE_WIDTH / 2;
+    if (spikeRight < playerLeft || spikeLeft > playerRight) continue;
+    if (ob.ground && playerBottom > RUNNER_GROUND_Y - ob.ground.height) {
+      loseLife('Hit a spike!');
+      return;
+    }
+    if (ob.ceiling && playerTop < RUNNER_CEILING_Y + ob.ceiling.height) {
+      loseLife('Hit a spike!');
       return;
     }
   }
@@ -979,8 +1214,8 @@ function checkCollectiblePickups() {
   }
 }
 
-function checkExitReached() {
-  if (!circlesOverlap(player, exitZone)) return;
+// Shared by both the maze exit-gate path and the runner gauntlet-clear path.
+function finishLevel() {
   const isLast = currentLevelIndex === LEVELS.length - 1;
   progress.completedLevels[currentLevelIndex] = true;
   if (progress.unlockedIndex === currentLevelIndex && currentLevelIndex < LEVELS.length - 1) {
@@ -992,6 +1227,11 @@ function checkExitReached() {
   if (isNewBest) progress.bestTimes[currentLevelIndex] = finishTime;
   saveProgress();
   if (isNewBest && username) submitScore(currentLevelIndex, username, finishTime);
+  // If this completion just unlocked a new world, hop the map view there so
+  // beating the last level of World 1 immediately reveals World 2's vista.
+  if (worldIndexForLevel(progress.unlockedIndex) !== worldIndexForLevel(currentLevelIndex)) {
+    viewedWorldIndex = worldIndexForLevel(progress.unlockedIndex);
+  }
   if (isLast) {
     showBanner('To be continued...', BANNER_TIME + 1.2);
   } else if (isNewBest) {
@@ -1002,23 +1242,69 @@ function checkExitReached() {
   returnToMenu(null);
 }
 
+function checkExitReached() {
+  if (!circlesOverlap(player, exitZone)) return;
+  finishLevel();
+}
+
+function checkRunnerFinish() {
+  if (runnerScroll < LEVELS[currentLevelIndex].gauntlet.length) return;
+  finishLevel();
+}
+
+function updateRunner(dt) {
+  const holding = keys.has(' ') || keys.has('arrowup');
+  if (runnerGrounded) {
+    if (holding) {
+      runnerCharging = true;
+      runnerChargeTime = Math.min(runnerChargeTime + dt, RUNNER_MAX_CHARGE_TIME);
+    } else if (runnerCharging) {
+      const t = runnerChargeTime / RUNNER_MAX_CHARGE_TIME;
+      runnerVelY = RUNNER_MIN_JUMP_VEL + (RUNNER_MAX_JUMP_VEL - RUNNER_MIN_JUMP_VEL) * t;
+      runnerGrounded = false;
+      runnerCharging = false;
+      runnerChargeTime = 0;
+    }
+  }
+  if (!runnerGrounded) {
+    runnerVelY -= RUNNER_GRAVITY * dt;
+    runnerHeight += runnerVelY * dt;
+    if (runnerHeight <= 0) {
+      runnerHeight = 0;
+      runnerVelY = 0;
+      runnerGrounded = true;
+    }
+  }
+  runnerScroll += RUNNER_SCROLL_SPEED * dt;
+  checkRunnerCollisions(dt);
+  if (phase === Phase.PLAYING) checkRunnerFinish();
+}
+
 function update(dt) {
   if (bannerTimer > 0) {
     bannerTimer -= dt;
     if (bannerTimer <= 0) bannerEl.classList.add('hidden');
   }
 
+  const isRunner = LEVELS[currentLevelIndex].mode === 'runner';
+
   if (phase === Phase.PLAYING) {
     levelTimer += dt;
     timeLabel.textContent = `Time: ${formatTime(levelTimer)}`;
-    updatePlayerMovement(dt);
-    for (const h of hazards) updateHazard(h, dt);
-    checkHazardCollisions(dt);
-    checkNearMiss(dt);
-    checkCollectiblePickups();
-    if (phase === Phase.PLAYING) checkExitReached();
+    if (isRunner) {
+      updateRunner(dt);
+    } else {
+      updatePlayerMovement(dt);
+      for (const h of hazards) updateHazard(h, dt);
+      checkHazardCollisions(dt);
+      checkNearMiss(dt);
+      checkCollectiblePickups();
+      if (phase === Phase.PLAYING) checkExitReached();
+    }
   } else if (phase === Phase.TRANSFORM_IN) {
-    for (const h of hazards) updateHazard(h, dt);
+    if (!isRunner) {
+      for (const h of hazards) updateHazard(h, dt);
+    }
     transformTimer += dt;
     if (transformTimer >= TRANSFORM_TIME) {
       phase = Phase.PLAYING;
@@ -1033,7 +1319,19 @@ function update(dt) {
   }
 }
 
-function drawCharacter(x, y, formT, bob, animState) {
+// Skin plumbing: one skin defined today ("the usual person"), but every
+// color drawCharacter uses is read from this object instead of hardcoded
+// literals so a future skin-select feature only needs to add entries here
+// and set currentSkin -- no drawCharacter changes.
+const SKINS = {
+  default: { legs: '#2e4a6b', torso: '#3a6ea8', head: '#f0c090', orb: '#7fd6ff' },
+};
+let currentSkin = 'default';
+function getSkin() {
+  return SKINS[currentSkin] || SKINS.default;
+}
+
+function drawCharacter(x, y, formT, bob, animState, skin = SKINS.default) {
   // formT: 0 = full human silhouette, 1 = fully the small traveling form
   const anim = animState || IDLE_ANIM;
   const guyScale = 1 - formT;
@@ -1050,16 +1348,16 @@ function drawCharacter(x, y, formT, bob, animState) {
     const stretch = anim.isMoving ? 1 + Math.abs(Math.sin(anim.animPhase)) * 0.04 : 1;
     ctx.scale(1, stretch);
 
-    ctx.fillStyle = '#2e4a6b';
+    ctx.fillStyle = skin.legs;
     ctx.fillRect(-9 + legOffset, -2, 6, 16);
     ctx.fillRect(3 - legOffset, -2, 6, 16);
 
-    ctx.fillStyle = '#3a6ea8';
+    ctx.fillStyle = skin.torso;
     ctx.fillRect(-12 + armOffset, -20, 5, 15);
     ctx.fillRect(7 - armOffset, -20, 5, 15);
     ctx.fillRect(-8, -22, 16, 20);
 
-    ctx.fillStyle = '#f0c090';
+    ctx.fillStyle = skin.head;
     ctx.beginPath();
     ctx.arc(0, -28, 7, 0, Math.PI * 2);
     ctx.fill();
@@ -1077,7 +1375,7 @@ function drawCharacter(x, y, formT, bob, animState) {
         const tx = x - anim.facing.x * ORB_TRAIL_SPACING * i;
         const ty = y - anim.facing.y * ORB_TRAIL_SPACING * i;
         ctx.globalAlpha = circleAlpha * (0.3 - i * 0.06);
-        ctx.fillStyle = '#7fd6ff';
+        ctx.fillStyle = skin.orb;
         ctx.beginPath();
         ctx.arc(tx, ty, baseRadius * (1 - i * 0.15), 0, Math.PI * 2);
         ctx.fill();
@@ -1085,8 +1383,8 @@ function drawCharacter(x, y, formT, bob, animState) {
       ctx.globalAlpha = circleAlpha;
     }
 
-    ctx.fillStyle = '#7fd6ff';
-    ctx.shadowColor = '#7fd6ff';
+    ctx.fillStyle = skin.orb;
+    ctx.shadowColor = skin.orb;
     ctx.shadowBlur = 12;
     ctx.beginPath();
     ctx.arc(x, y, baseRadius, 0, Math.PI * 2);
@@ -1305,9 +1603,37 @@ function drawVillageNode(x, y, opts) {
   ctx.restore();
 }
 
+function drawWorldArrow(x, y, dir) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(10,14,20,0.55)';
+  ctx.beginPath();
+  ctx.arc(x, y, WORLD_ARROW_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (dir < 0) {
+    ctx.moveTo(x + 5, y - 8);
+    ctx.lineTo(x - 5, y);
+    ctx.lineTo(x + 5, y + 8);
+  } else {
+    ctx.moveTo(x - 5, y - 8);
+    ctx.lineTo(x + 5, y);
+    ctx.lineTo(x - 5, y + 8);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawWorldSwitchArrows() {
+  if (canViewWorld(viewedWorldIndex - 1)) drawWorldArrow(WORLD_ARROW_MARGIN, WORLD_ARROW_Y, -1);
+  if (canViewWorld(viewedWorldIndex + 1)) drawWorldArrow(canvas.width - WORLD_ARROW_MARGIN, WORLD_ARROW_Y, 1);
+}
+
 function renderMenu() {
-  ctx.drawImage(mapBackgroundCanvas, 0, 0);
-  drawRiverFlow();
+  const world = WORLDS[viewedWorldIndex];
+  ctx.drawImage(world.theme === 'mountain' ? mapBackgroundCanvas : cavernMapBackgroundCanvas, 0, 0);
+  if (world.theme === 'mountain') drawRiverFlow();
 
   ctx.save();
   ctx.textAlign = 'center';
@@ -1315,7 +1641,7 @@ function renderMenu() {
   ctx.font = 'bold 20px sans-serif';
   ctx.shadowColor = 'rgba(0,0,0,0.4)';
   ctx.shadowBlur = 6;
-  ctx.fillText('The Mountain Road', canvas.width / 2, 46);
+  ctx.fillText(world.name, canvas.width / 2, 46);
   ctx.restore();
 
   const gemTotal = progress.gemsCollected.reduce((sum, arr) => sum + arr.filter(Boolean).length, 0);
@@ -1328,19 +1654,26 @@ function renderMenu() {
   ctx.fillText(`♦ ${gemTotal}`, canvas.width - 16, 30);
   ctx.restore();
 
-  WORLD_PATH.forEach((n, i) => {
-    const locked = i > progress.unlockedIndex;
-    const completed = progress.completedLevels[i];
-    const hovered = i === menuHoverIndex;
-    drawVillageNode(n.x, n.y, { locked, completed, hovered, label: i + 1 });
+  world.path.forEach((n, i) => {
+    const levelIdx = world.startIndex + i;
+    const locked = levelIdx > progress.unlockedIndex;
+    const completed = progress.completedLevels[levelIdx];
+    const hovered = levelIdx === menuHoverIndex;
+    drawVillageNode(n.x, n.y, { locked, completed, hovered, label: levelIdx + 1 });
   });
 
-  const frontier = WORLD_PATH[Math.min(progress.unlockedIndex, WORLD_PATH.length - 1)];
-  const bob = Math.sin(performance.now() / 300) * 3;
-  drawCharacter(frontier.x, frontier.y - NODE_RADIUS - 20, 0, bob, IDLE_ANIM);
+  const globalFrontierIdx = Math.min(progress.unlockedIndex, LEVELS.length - 1);
+  const showFrontierChar = worldIndexForLevel(globalFrontierIdx) === viewedWorldIndex;
+  if (showFrontierChar) {
+    const frontier = world.path[globalFrontierIdx - world.startIndex];
+    const bob = Math.sin(performance.now() / 300) * 3;
+    drawCharacter(frontier.x, frontier.y - NODE_RADIUS - 20, 0, bob, IDLE_ANIM, getSkin());
+  }
 
-  const displayIndex = menuHoverIndex !== -1 ? menuHoverIndex : progress.unlockedIndex;
-  if (displayIndex <= progress.unlockedIndex) {
+  drawWorldSwitchArrows();
+
+  const displayIndex = menuHoverIndex !== -1 ? menuHoverIndex : (showFrontierChar ? globalFrontierIdx : -1);
+  if (displayIndex !== -1 && displayIndex <= progress.unlockedIndex) {
     const displayBest = progress.bestTimes[displayIndex];
     const panelHeight = displayBest != null ? 48 : 30;
     ctx.save();
@@ -1377,21 +1710,79 @@ function drawNearMissFlash() {
   ctx.restore();
 }
 
+function drawGroundSpike(x, height) {
+  ctx.save();
+  ctx.fillStyle = '#c8c8d8';
+  ctx.beginPath();
+  ctx.moveTo(x - RUNNER_SPIKE_WIDTH / 2, RUNNER_GROUND_Y);
+  ctx.lineTo(x, RUNNER_GROUND_Y - height);
+  ctx.lineTo(x + RUNNER_SPIKE_WIDTH / 2, RUNNER_GROUND_Y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawCeilingSpike(x, height) {
+  ctx.save();
+  ctx.fillStyle = '#c8c8d8';
+  ctx.beginPath();
+  ctx.moveTo(x - RUNNER_SPIKE_WIDTH / 2, RUNNER_CEILING_Y);
+  ctx.lineTo(x, RUNNER_CEILING_Y + height);
+  ctx.lineTo(x + RUNNER_SPIKE_WIDTH / 2, RUNNER_CEILING_Y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function renderRunnerScene() {
+  drawCaveGlow(ctx);
+
+  ctx.fillStyle = CAVE_FLOOR_BOTTOM;
+  ctx.fillRect(0, RUNNER_GROUND_Y, canvas.width, canvas.height - RUNNER_GROUND_Y);
+  ctx.fillStyle = 'rgba(5,4,9,0.7)';
+  ctx.fillRect(0, 0, canvas.width, RUNNER_CEILING_Y);
+
+  const gauntlet = LEVELS[currentLevelIndex].gauntlet;
+  for (const ob of gauntlet.obstacles) {
+    const screenX = RUNNER_PLAYER_X + (ob.gaugeX - runnerScroll);
+    if (screenX < -RUNNER_SPIKE_WIDTH || screenX > canvas.width + RUNNER_SPIKE_WIDTH) continue;
+    if (ob.ground) drawGroundSpike(screenX, ob.ground.height);
+    if (ob.ceiling) drawCeilingSpike(screenX, ob.ceiling.height);
+  }
+
+  if (runnerCharging) {
+    const t = runnerChargeTime / RUNNER_MAX_CHARGE_TIME;
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(RUNNER_PLAYER_X - 16, RUNNER_GROUND_Y + 12, 32, 5);
+    ctx.fillStyle = '#7fd6ff';
+    ctx.fillRect(RUNNER_PLAYER_X - 16, RUNNER_GROUND_Y + 12, 32 * t, 5);
+    ctx.restore();
+  }
+}
+
 function render() {
+  const isRunner = LEVELS[currentLevelIndex].mode === 'runner';
   if (phase === Phase.MENU) {
     renderMenu();
   } else if (phase === Phase.PLAYING || phase === Phase.PAUSED) {
-    renderMaze();
-    drawCharacter(player.x, player.y, 1, 0, { facing: { x: player.facingX, y: player.facingY }, isMoving: player.isMoving, animPhase: player.animPhase });
+    if (isRunner) {
+      renderRunnerScene();
+      drawCharacter(RUNNER_PLAYER_X, RUNNER_GROUND_Y - runnerHeight - 14, 0, 0, RUNNER_ANIM, getSkin());
+    } else {
+      renderMaze();
+      drawCharacter(player.x, player.y, 1, 0, { facing: { x: player.facingX, y: player.facingY }, isMoving: player.isMoving, animPhase: player.animPhase }, getSkin());
+    }
     drawNearMissFlash();
   } else if (phase === Phase.TRANSFORM_IN) {
-    renderMaze();
+    if (isRunner) renderRunnerScene();
+    else renderMaze();
     const t = Math.min(transformTimer / TRANSFORM_TIME, 1);
-    drawCharacter(transformAnchor.x, transformAnchor.y, t, 0, IDLE_ANIM);
+    drawCharacter(transformAnchor.x, transformAnchor.y, t, 0, IDLE_ANIM, getSkin());
   } else if (phase === Phase.TRANSFORM_OUT) {
     renderMenu();
     const t = Math.min(transformTimer / TRANSFORM_TIME, 1);
-    drawCharacter(transformAnchor.x, transformAnchor.y, 1 - t, 0, IDLE_ANIM);
+    drawCharacter(transformAnchor.x, transformAnchor.y, 1 - t, 0, IDLE_ANIM, getSkin());
   }
 }
 
@@ -1497,6 +1888,7 @@ if (username) {
 }
 
 buildMapBackground();
+buildCavernMapBackground();
 
 function resizeGame() {
   const scale = Math.min(window.innerWidth / 800, window.innerHeight / 600);
