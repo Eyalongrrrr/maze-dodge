@@ -504,6 +504,18 @@ let username = localStorage.getItem(USERNAME_KEY) || '';
 // finishLevel() advances it automatically the moment a *new* world unlocks.
 let viewedWorldIndex = worldIndexForLevel(Math.min(progress.unlockedIndex, LEVELS.length - 1));
 
+// World-switch slide transition. Parallel state, not a new Phase -- the menu
+// stays in Phase.MENU throughout, unlike the level-entry TRANSFORM_IN/OUT
+// tween this deliberately doesn't reuse (that one is tied to a single sprite
+// blending between level<->menu scenes, not a fit for sliding two map
+// backgrounds against each other). worldSwitchTimer >= WORLD_SWITCH_TIME
+// means "no transition in progress", matching the >0-is-active convention
+// bannerTimer already uses elsewhere.
+const WORLD_SWITCH_TIME = 0.4;
+let worldSwitchTimer = WORLD_SWITCH_TIME;
+let worldSwitchFromIndex = viewedWorldIndex;
+let worldSwitchDir = 1;
+
 const player = { x: 0, y: 0, radius: PLAYER_RADIUS, facingX: 0, facingY: 1, isMoving: false, animPhase: 0 };
 let walls = [];
 let hazards = [];
@@ -612,6 +624,7 @@ canvas.addEventListener('click', (e) => {
   const { x: mx, y: my } = canvasCoords(e);
 
   if (phase === Phase.MENU) {
+    if (worldSwitchTimer < WORLD_SWITCH_TIME) return; // ignore clicks mid-slide (stale/mid-animation positions)
     const sw = worldSwitchHitTest(mx, my);
     if (sw !== 0) { switchViewedWorld(sw); return; }
     const idx = nodeIndexAt(mx, my, WORLDS[viewedWorldIndex]);
@@ -658,7 +671,12 @@ function nodeIndexAt(mx, my, world) {
   return -1;
 }
 
-const WORLD_ARROW_Y = 46;
+// Vertically centered (not a top corner) -- a top-corner position used to
+// overlap #leaderboardBtn's clickable box, which sat in front of the canvas
+// and silently swallowed clicks meant for the arrow. Keep future arrow
+// placements off both top corners (leaderboard button on the left, gem
+// total on the right) for the same reason.
+const WORLD_ARROW_Y = 300;
 const WORLD_ARROW_MARGIN = 30;
 const WORLD_ARROW_RADIUS = 16;
 
@@ -677,6 +695,9 @@ function worldSwitchHitTest(mx, my) {
 function switchViewedWorld(dir) {
   const next = viewedWorldIndex + dir;
   if (canViewWorld(next)) {
+    worldSwitchFromIndex = viewedWorldIndex;
+    worldSwitchDir = dir;
+    worldSwitchTimer = 0;
     viewedWorldIndex = next;
     menuHoverIndex = -1;
   }
@@ -841,36 +862,70 @@ function drawRiverFlow() {
   ctx.restore();
 }
 
+// Catmull-Rom-to-Bezier: the standard technique for a smooth curve that
+// passes exactly through an arbitrary sequence of points (unlike a single
+// quadratic/bezier, which only takes a fixed control-point count). Endpoints
+// clamp by duplicating the first/last point as their own "neighbor", which
+// degrades gracefully to a near-straight segment for a 2-point path.
+function catmullRomSegments(path) {
+  const segments = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    const p0 = path[Math.max(i - 1, 0)];
+    const p1 = path[i];
+    const p2 = path[i + 1];
+    const p3 = path[Math.min(i + 2, path.length - 1)];
+    segments.push({
+      cp1: { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 },
+      cp2: { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 },
+      end: p2,
+    });
+  }
+  return segments;
+}
+
+function bezierPoint(p0, cp1, cp2, p3, t) {
+  const u = 1 - t;
+  return {
+    x: u * u * u * p0.x + 3 * u * u * t * cp1.x + 3 * u * t * t * cp2.x + t * t * t * p3.x,
+    y: u * u * u * p0.y + 3 * u * u * t * cp1.y + 3 * u * t * t * cp2.y + t * t * t * p3.y,
+  };
+}
+
 function drawTrail(octx, path = WORLD_PATH) {
+  if (path.length < 2) return;
+  const segments = catmullRomSegments(path);
   octx.save();
   octx.strokeStyle = 'rgba(122,93,58,0.6)';
   octx.lineWidth = 10;
   octx.lineCap = 'round';
   octx.lineJoin = 'round';
   octx.beginPath();
-  path.forEach((n, i) => (i === 0 ? octx.moveTo(n.x, n.y) : octx.lineTo(n.x, n.y)));
+  octx.moveTo(path[0].x, path[0].y);
+  segments.forEach((s) => octx.bezierCurveTo(s.cp1.x, s.cp1.y, s.cp2.x, s.cp2.y, s.end.x, s.end.y));
   octx.stroke();
 
   octx.strokeStyle = '#c9a86a';
   octx.lineWidth = 3;
   octx.setLineDash([6, 10]);
   octx.beginPath();
-  path.forEach((n, i) => (i === 0 ? octx.moveTo(n.x, n.y) : octx.lineTo(n.x, n.y)));
+  octx.moveTo(path[0].x, path[0].y);
+  segments.forEach((s) => octx.bezierCurveTo(s.cp1.x, s.cp1.y, s.cp2.x, s.cp2.y, s.end.x, s.end.y));
   octx.stroke();
   octx.setLineDash([]);
 
-  for (let seg = 0; seg < path.length - 1; seg++) {
-    const a = path[seg], b = path[seg + 1];
+  segments.forEach((s, seg) => {
+    const p0 = seg === 0 ? path[0] : segments[seg - 1].end;
     for (let k = 0; k < 3; k++) {
       const t = hashCell(seg, k, 50);
-      const px = a.x + (b.x - a.x) * t + (hashCell(seg, k, 51) - 0.5) * 14;
-      const py = a.y + (b.y - a.y) * t + (hashCell(seg, k, 52) - 0.5) * 14;
+      const pt = bezierPoint(p0, s.cp1, s.cp2, s.end, t);
+      const px = pt.x + (hashCell(seg, k, 51) - 0.5) * 14;
+      const py = pt.y + (hashCell(seg, k, 52) - 0.5) * 14;
       octx.fillStyle = '#8a7355';
       octx.beginPath();
       octx.arc(px, py, 2, 0, Math.PI * 2);
       octx.fill();
     }
-  }
+  });
   octx.restore();
 }
 
@@ -1410,6 +1465,10 @@ function update(dt) {
     if (bannerTimer <= 0) bannerEl.classList.add('hidden');
   }
 
+  if (worldSwitchTimer < WORLD_SWITCH_TIME) {
+    worldSwitchTimer = Math.min(worldSwitchTimer + dt, WORLD_SWITCH_TIME);
+  }
+
   const isRunner = LEVELS[currentLevelIndex].mode === 'runner';
 
   if (phase === Phase.PLAYING) {
@@ -1754,10 +1813,66 @@ function drawWorldSwitchArrows() {
   if (canViewWorld(viewedWorldIndex + 1)) drawWorldArrow(canvas.width - WORLD_ARROW_MARGIN, WORLD_ARROW_Y, 1);
 }
 
-function renderMenu() {
-  const world = WORLDS[viewedWorldIndex];
+// Everything that visually belongs to one specific world's map -- background,
+// nodes, frontier character, hover/flavor panel -- offset horizontally so
+// renderMenu() can draw two of these at once mid-slide (the outgoing and
+// incoming world) without duplicating this logic. Title text, gem total, and
+// the switch arrows are deliberately NOT part of this -- they're fixed UI
+// chrome that doesn't slide, drawn once by renderMenu() itself.
+function renderWorldScene(world, offsetX) {
+  ctx.save();
+  ctx.translate(offsetX, 0);
+
   ctx.drawImage(world.theme === 'mountain' ? mapBackgroundCanvas : cavernMapBackgroundCanvas, 0, 0);
   if (world.theme === 'mountain') drawRiverFlow();
+
+  world.path.forEach((n, i) => {
+    const levelIdx = world.startIndex + i;
+    const locked = levelIdx > progress.unlockedIndex;
+    const completed = progress.completedLevels[levelIdx];
+    const hovered = levelIdx === menuHoverIndex;
+    drawVillageNode(n.x, n.y, { locked, completed, hovered, label: levelIdx + 1 });
+  });
+
+  const worldIdx = WORLDS.indexOf(world);
+  const globalFrontierIdx = Math.min(progress.unlockedIndex, LEVELS.length - 1);
+  const showFrontierChar = worldIndexForLevel(globalFrontierIdx) === worldIdx;
+  if (showFrontierChar) {
+    const frontier = world.path[globalFrontierIdx - world.startIndex];
+    const bob = Math.sin(performance.now() / 300) * 3;
+    drawCharacter(frontier.x, frontier.y - NODE_RADIUS - 20, 0, bob, IDLE_ANIM, getSkin());
+  }
+
+  const displayIndex = menuHoverIndex !== -1 ? menuHoverIndex : (showFrontierChar ? globalFrontierIdx : -1);
+  if (displayIndex !== -1 && displayIndex <= progress.unlockedIndex && worldIndexForLevel(displayIndex) === worldIdx) {
+    const displayBest = progress.bestTimes[displayIndex];
+    const panelHeight = displayBest != null ? 48 : 30;
+    ctx.fillStyle = 'rgba(10,14,20,0.55)';
+    ctx.fillRect(canvas.width / 2 - 220, 480, 440, panelHeight);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'italic 15px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(LEVELS[displayIndex].flavorText, canvas.width / 2, 500);
+    if (displayBest != null) {
+      ctx.font = '12px sans-serif';
+      ctx.fillStyle = '#ffe9a8';
+      ctx.fillText(`Best: ${formatTime(displayBest)}`, canvas.width / 2, 518);
+    }
+  }
+  ctx.restore();
+}
+
+function renderMenu() {
+  const world = WORLDS[viewedWorldIndex];
+
+  if (worldSwitchTimer < WORLD_SWITCH_TIME) {
+    const p = worldSwitchTimer / WORLD_SWITCH_TIME;
+    const slide = p * canvas.width;
+    renderWorldScene(WORLDS[worldSwitchFromIndex], -slide * worldSwitchDir);
+    renderWorldScene(world, canvas.width * worldSwitchDir - slide * worldSwitchDir);
+  } else {
+    renderWorldScene(world, 0);
+  }
 
   ctx.save();
   ctx.textAlign = 'center';
@@ -1778,43 +1893,7 @@ function renderMenu() {
   ctx.fillText(`♦ ${gemTotal}`, canvas.width - 16, 30);
   ctx.restore();
 
-  world.path.forEach((n, i) => {
-    const levelIdx = world.startIndex + i;
-    const locked = levelIdx > progress.unlockedIndex;
-    const completed = progress.completedLevels[levelIdx];
-    const hovered = levelIdx === menuHoverIndex;
-    drawVillageNode(n.x, n.y, { locked, completed, hovered, label: levelIdx + 1 });
-  });
-
-  const globalFrontierIdx = Math.min(progress.unlockedIndex, LEVELS.length - 1);
-  const showFrontierChar = worldIndexForLevel(globalFrontierIdx) === viewedWorldIndex;
-  if (showFrontierChar) {
-    const frontier = world.path[globalFrontierIdx - world.startIndex];
-    const bob = Math.sin(performance.now() / 300) * 3;
-    drawCharacter(frontier.x, frontier.y - NODE_RADIUS - 20, 0, bob, IDLE_ANIM, getSkin());
-  }
-
   drawWorldSwitchArrows();
-
-  const displayIndex = menuHoverIndex !== -1 ? menuHoverIndex : (showFrontierChar ? globalFrontierIdx : -1);
-  if (displayIndex !== -1 && displayIndex <= progress.unlockedIndex) {
-    const displayBest = progress.bestTimes[displayIndex];
-    const panelHeight = displayBest != null ? 48 : 30;
-    ctx.save();
-    ctx.fillStyle = 'rgba(10,14,20,0.55)';
-    ctx.fillRect(canvas.width / 2 - 220, 480, 440, panelHeight);
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'italic 15px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(LEVELS[displayIndex].flavorText, canvas.width / 2, 500);
-    if (displayBest != null) {
-      ctx.font = '12px sans-serif';
-      ctx.fillStyle = '#ffe9a8';
-      ctx.fillText(`Best: ${formatTime(displayBest)}`, canvas.width / 2, 518);
-    }
-    ctx.restore();
-  }
-  ctx.textAlign = 'left';
 }
 
 function drawNearMissFlash() {
