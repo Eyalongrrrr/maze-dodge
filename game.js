@@ -74,6 +74,18 @@ const RUNNER_PLAYER_HALF_WIDTH = 9;
 const RUNNER_PLAYER_HEIGHT = 34;
 const RUNNER_SPIKE_WIDTH = 26;
 
+// Runner-mode dash orb: some spike tunnels are tall enough top-and-bottom
+// that no jump height clears them (see checkRunnerCollisions -- a ground
+// spike taller than the ceiling-spike-adjusted safe max makes every height
+// unsafe at once). The orb grants a brief invulnerability window (reusing
+// the existing invulnTimer field, so checkRunnerCollisions needs zero new
+// logic -- it already skips all collision checks while invulnTimer > 0) so
+// the player can scroll straight through instead of jumping.
+const RUNNER_DASH_ORB_RADIUS = 10;
+const RUNNER_DASH_ORB_PROXIMITY = 80;
+const RUNNER_DASH_DURATION = 2.4;
+const RUNNER_DASH_ORB_COLOR = '#7fe8ff';
+
 // Leaderboard backend (Supabase PostgREST) -- this is the ONLY part of Maze Dodge
 // that ever talks to a network. Left blank until configured; every call below
 // checks for that and no-ops instead of attempting a request, so the game stays
@@ -124,7 +136,7 @@ const WORLD_PATH = [
 // LEVELS index range to its own map/theme/node path. World unlocking is a
 // pure byproduct of the existing flat progress.unlockedIndex gate; no new
 // unlock logic needed.
-const CAVERN_PATH = [{ x: 400, y: 300 }];
+const CAVERN_PATH = [{ x: 400, y: 300 }, { x: 590, y: 190 }];
 
 const WORLDS = [
   { name: 'The Mountain Road', theme: 'mountain', startIndex: 0, path: WORLD_PATH },
@@ -378,6 +390,55 @@ const LEVELS = [
       ],
     },
   },
+  {
+    name: 'The Narrows',
+    flavorText: 'The cavern pinches to a spike-choked seam -- the old quick-trick glow still lingers here.',
+    mode: 'runner',
+    // First three obstacles reuse the exact ground/ceiling heights already
+    // proven clearable in "The Long Drop" (see that level's comment) --
+    // spaced even more generously here (400px vs 300-350px) since this
+    // level's real escalation is the tunnel, not these warmups.
+    // The tunnel: ground=100 + ceiling=100 makes EVERY runnerHeight unsafe
+    // simultaneously (ceiling_safe_max caps at RUNNER_GROUND_Y -
+    // RUNNER_PLAYER_HEIGHT - RUNNER_CEILING_Y - 100 = 46, which is less than
+    // the 100 the ground spike requires -- no jump height satisfies both),
+    // tiled wall-to-wall at RUNNER_SPIKE_WIDTH intervals so it reads as one
+    // continuous seam rather than a gap-toothed row. Only the dash orb's
+    // invulnerability (see triggerNearestRunnerDashOrb) gets you through.
+    // The orb sits far enough before the tunnel, and RUNNER_DASH_DURATION is
+    // long enough, that even the earliest possible trigger (orb proximity's
+    // near edge) covers the tunnel's full length with margin -- verified in
+    // tools/runner_solvability_checker.py, not just eyeballed.
+    gauntlet: {
+      length: 2900,
+      obstacles: [
+        { gaugeX: 500, ground: { height: 50 } },
+        { gaugeX: 900, ground: { height: 30 }, ceiling: { height: 96 } },
+        { gaugeX: 1300, ground: { height: 80 } },
+        // The tunnel: 12 tiled ground+ceiling pairs, edge-to-edge at
+        // RUNNER_SPIKE_WIDTH intervals (1863, 1889, ... 2149) so it reads as
+        // one continuous seam. Written as explicit literals (not generated
+        // via Array.from) so tools/runner_solvability_checker.py's
+        // text-based parser can see every obstacle -- this project's
+        // convention is that level data is plain literal data, never
+        // runtime-computed, precisely so tooling never has to evaluate JS.
+        { gaugeX: 1863, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 1889, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 1915, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 1941, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 1967, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 1993, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 2019, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 2045, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 2071, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 2097, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 2123, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 2149, ground: { height: 100 }, ceiling: { height: 100 } },
+        { gaugeX: 2550, ground: { height: 65 } },
+      ],
+    },
+    dashOrbs: [{ gaugeX: 1700 }],
+  },
 ];
 
 function ensureProgressShape(p) {
@@ -454,6 +515,7 @@ let runnerVelY = 0;
 let runnerGrounded = true;
 let runnerCharging = false;
 let runnerChargeTime = 0;
+let runnerDashOrbs = [];
 
 let lives = LIVES_PER_ATTEMPT;
 let invulnTimer = 0;
@@ -494,8 +556,19 @@ window.addEventListener('keydown', (e) => {
   }
   if (key === ' ') {
     e.preventDefault();
-    if (phase === Phase.PLAYING) triggerNearestDashOrb();
-    return;
+    if (phase === Phase.PLAYING) {
+      if (LEVELS[currentLevelIndex].mode === 'runner') {
+        // Runner mode overloads Space for two things: it's also the
+        // hold-to-charge jump key (see updateRunner), so unlike the maze's
+        // Space handling it must still reach `keys` below, not return early.
+        triggerNearestRunnerDashOrb();
+      } else {
+        triggerNearestDashOrb();
+        return;
+      }
+    } else {
+      return;
+    }
   }
   if (NAV_KEYS.has(key)) e.preventDefault();
   keys.add(key);
@@ -751,26 +824,26 @@ function drawRiverFlow() {
   ctx.restore();
 }
 
-function drawTrail(octx) {
+function drawTrail(octx, path = WORLD_PATH) {
   octx.save();
   octx.strokeStyle = 'rgba(122,93,58,0.6)';
   octx.lineWidth = 10;
   octx.lineCap = 'round';
   octx.lineJoin = 'round';
   octx.beginPath();
-  WORLD_PATH.forEach((n, i) => (i === 0 ? octx.moveTo(n.x, n.y) : octx.lineTo(n.x, n.y)));
+  path.forEach((n, i) => (i === 0 ? octx.moveTo(n.x, n.y) : octx.lineTo(n.x, n.y)));
   octx.stroke();
 
   octx.strokeStyle = '#c9a86a';
   octx.lineWidth = 3;
   octx.setLineDash([6, 10]);
   octx.beginPath();
-  WORLD_PATH.forEach((n, i) => (i === 0 ? octx.moveTo(n.x, n.y) : octx.lineTo(n.x, n.y)));
+  path.forEach((n, i) => (i === 0 ? octx.moveTo(n.x, n.y) : octx.lineTo(n.x, n.y)));
   octx.stroke();
   octx.setLineDash([]);
 
-  for (let seg = 0; seg < WORLD_PATH.length - 1; seg++) {
-    const a = WORLD_PATH[seg], b = WORLD_PATH[seg + 1];
+  for (let seg = 0; seg < path.length - 1; seg++) {
+    const a = path[seg], b = path[seg + 1];
     for (let k = 0; k < 3; k++) {
       const t = hashCell(seg, k, 50);
       const px = a.x + (b.x - a.x) * t + (hashCell(seg, k, 51) - 0.5) * 14;
@@ -898,6 +971,8 @@ function buildCavernMapBackground() {
     drawCrystalCluster(octx, x, y, 8 + hashCell(i, 4, 199) * 8);
   }
 
+  if (CAVERN_PATH.length > 1) drawTrail(octx, CAVERN_PATH);
+
   cavernMapBackgroundCanvas = off;
 }
 
@@ -988,7 +1063,7 @@ function showBanner(text, seconds) {
   bannerTimer = seconds;
 }
 
-function setupRunnerLevel() {
+function setupRunnerLevel(levelDef) {
   player.x = RUNNER_PLAYER_X;
   player.y = RUNNER_GROUND_Y;
   hazards = [];
@@ -1000,6 +1075,7 @@ function setupRunnerLevel() {
   runnerGrounded = true;
   runnerCharging = false;
   runnerChargeTime = 0;
+  runnerDashOrbs = (levelDef.dashOrbs || []).map((def) => ({ gaugeX: def.gaugeX, radius: RUNNER_DASH_ORB_RADIUS, used: false }));
   transformAnchor = { x: RUNNER_PLAYER_X, y: RUNNER_GROUND_Y - 14 };
 }
 
@@ -1007,7 +1083,7 @@ function enterLevel(index) {
   currentLevelIndex = index;
   const levelDef = LEVELS[index];
   if (levelDef.mode === 'runner') {
-    setupRunnerLevel();
+    setupRunnerLevel(levelDef);
   } else {
     const parsed = parseLevel(levelDef);
     walls = parsed.isWallGrid;
@@ -1042,7 +1118,7 @@ function enterLevel(index) {
 function respawnInLevel() {
   const levelDef = LEVELS[currentLevelIndex];
   if (levelDef.mode === 'runner') {
-    setupRunnerLevel();
+    setupRunnerLevel(levelDef);
     invulnTimer = INVULN_TIME;
     return;
   }
@@ -1101,6 +1177,27 @@ function triggerNearestDashOrb() {
     }
   }
   if (nearest) triggerDashOrb(nearest);
+}
+
+// Runner-mode counterpart: no facing/direction concept (the player doesn't
+// move horizontally, the world scrolls), so triggering just grants a timed
+// invulnerability window via the shared invulnTimer field instead of a
+// directional burst -- see the RUNNER_DASH_* constants for why.
+function triggerNearestRunnerDashOrb() {
+  let nearest = null;
+  let nearestDist = Infinity;
+  for (const orb of runnerDashOrbs) {
+    if (orb.used) continue;
+    const dist = Math.abs(orb.gaugeX - runnerScroll);
+    if (dist <= RUNNER_DASH_ORB_PROXIMITY && dist < nearestDist) {
+      nearest = orb;
+      nearestDist = dist;
+    }
+  }
+  if (nearest) {
+    nearest.used = true;
+    invulnTimer = Math.max(invulnTimer, RUNNER_DASH_DURATION);
+  }
 }
 
 function updatePlayerMovement(dt) {
@@ -1734,6 +1831,34 @@ function drawCeilingSpike(x, height) {
   ctx.restore();
 }
 
+function drawRunnerDashOrb(screenX, orb, t) {
+  const y = (RUNNER_GROUND_Y + RUNNER_CEILING_Y) / 2;
+  ctx.save();
+  if (orb.used) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(screenX, y, orb.radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+  const near = Math.abs(orb.gaugeX - runnerScroll) <= RUNNER_DASH_ORB_PROXIMITY;
+  const pulse = 0.8 + 0.2 * Math.sin(t / 220);
+  ctx.strokeStyle = RUNNER_DASH_ORB_COLOR;
+  ctx.shadowColor = RUNNER_DASH_ORB_COLOR;
+  ctx.shadowBlur = near ? 16 * pulse : 8 * pulse;
+  ctx.lineWidth = near ? 3 : 2;
+  ctx.beginPath();
+  ctx.arc(screenX, y, orb.radius * pulse, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(screenX, y, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function renderRunnerScene() {
   drawCaveGlow(ctx);
 
@@ -1748,6 +1873,21 @@ function renderRunnerScene() {
     if (screenX < -RUNNER_SPIKE_WIDTH || screenX > canvas.width + RUNNER_SPIKE_WIDTH) continue;
     if (ob.ground) drawGroundSpike(screenX, ob.ground.height);
     if (ob.ceiling) drawCeilingSpike(screenX, ob.ceiling.height);
+  }
+
+  const nowT = performance.now();
+  for (const orb of runnerDashOrbs) {
+    const screenX = RUNNER_PLAYER_X + (orb.gaugeX - runnerScroll);
+    if (screenX < -RUNNER_DASH_ORB_RADIUS || screenX > canvas.width + RUNNER_DASH_ORB_RADIUS) continue;
+    drawRunnerDashOrb(screenX, orb, nowT);
+  }
+
+  if (invulnTimer > 0 && runnerDashOrbs.some((o) => o.used)) {
+    ctx.save();
+    ctx.globalAlpha = 0.12 + 0.06 * Math.sin(nowT / 90);
+    ctx.fillStyle = RUNNER_DASH_ORB_COLOR;
+    ctx.fillRect(0, RUNNER_CEILING_Y, canvas.width, RUNNER_GROUND_Y - RUNNER_CEILING_Y);
+    ctx.restore();
   }
 
   if (runnerCharging) {
