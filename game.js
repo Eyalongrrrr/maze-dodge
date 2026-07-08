@@ -428,18 +428,22 @@ window.addEventListener('keyup', (e) => {
   keys.delete(e.key.toLowerCase());
 });
 
+function canvasCoords(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (canvas.width / rect.width),
+    y: (e.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
 canvas.addEventListener('mousemove', (e) => {
   if (phase !== Phase.MENU) return;
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
+  const { x: mx, y: my } = canvasCoords(e);
   menuHoverIndex = nodeIndexAt(mx, my);
 });
 
 canvas.addEventListener('click', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
+  const { x: mx, y: my } = canvasCoords(e);
 
   if (phase === Phase.MENU) {
     const idx = nodeIndexAt(mx, my);
