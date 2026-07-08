@@ -1,4 +1,5 @@
 const canvas = document.getElementById('gameCanvas');
+const gameContainer = document.getElementById('gameContainer');
 const ctx = canvas.getContext('2d');
 
 const startScreen = document.getElementById('startScreen');
@@ -1492,6 +1493,13 @@ if (username) {
 }
 
 buildMapBackground();
+
+function resizeGame() {
+  const scale = Math.min(window.innerWidth / 800, window.innerHeight / 600);
+  gameContainer.style.transform = `scale(${scale})`;
+}
+window.addEventListener('resize', resizeGame);
+resizeGame();
 
 let lastTime = 0;
 function loop(timestamp) {
