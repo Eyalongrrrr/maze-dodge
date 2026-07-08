@@ -54,8 +54,9 @@ RUNNER_SCROLL_SPEED = 260
 RUNNER_PLAYER_HALF_WIDTH = 9
 RUNNER_SPIKE_WIDTH = 26
 RUNNER_PLAYER_HEIGHT = 34  # approximate visual height used for the ceiling AABB, see drawCharacter
-RUNNER_DASH_ORB_PROXIMITY = 80
+RUNNER_DASH_ORB_PROXIMITY = 40
 RUNNER_DASH_DURATION = 2.4
+RUNNER_DASH_SCROLL_BOOST_MUL = 1.7
 
 REACTION_BUFFER = 0.4  # seconds of slack required between landing and the next obstacle's window
 MAX_VERTICAL_SPACE = RUNNER_GROUND_Y - RUNNER_PLAYER_HEIGHT - RUNNER_CEILING_Y  # 146
@@ -197,7 +198,10 @@ def dash_group_coverage(group, orb):
     """
     group_start = min(obstacle_danger_span(ob)[0] for ob in group)
     group_end = max(obstacle_danger_span(ob)[1] for ob in group)
-    dash_reach = RUNNER_DASH_DURATION * RUNNER_SCROLL_SPEED
+    # The dash also boosts scroll speed for its duration (see RUNNER_DASH_SCROLL_BOOST_MUL
+    # in game.js), so reach is larger than duration * base speed -- using the boosted
+    # figure here keeps this an accurate model, not just a conservative under-estimate.
+    dash_reach = RUNNER_DASH_DURATION * RUNNER_SCROLL_SPEED * RUNNER_DASH_SCROLL_BOOST_MUL
 
     proximity_lo = orb['gaugeX'] - RUNNER_DASH_ORB_PROXIMITY
     proximity_hi = orb['gaugeX'] + RUNNER_DASH_ORB_PROXIMITY

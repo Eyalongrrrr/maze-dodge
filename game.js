@@ -80,10 +80,16 @@ const RUNNER_SPIKE_WIDTH = 26;
 // unsafe at once). The orb grants a brief invulnerability window (reusing
 // the existing invulnTimer field, so checkRunnerCollisions needs zero new
 // logic -- it already skips all collision checks while invulnTimer > 0) so
-// the player can scroll straight through instead of jumping.
+// the player can scroll straight through instead of jumping. It also grants
+// a separate, dedicated scroll-speed boost for the same duration (kept as
+// its own timer, not folded into invulnTimer, since invulnTimer is *also*
+// used for the plain post-respawn grace period, which must NOT speed up the
+// scroll -- that would shift every obstacle's arrival time and invalidate
+// the level's whole timing design).
 const RUNNER_DASH_ORB_RADIUS = 10;
-const RUNNER_DASH_ORB_PROXIMITY = 80;
+const RUNNER_DASH_ORB_PROXIMITY = 40;
 const RUNNER_DASH_DURATION = 2.4;
+const RUNNER_DASH_SCROLL_BOOST_MUL = 1.7;
 const RUNNER_DASH_ORB_COLOR = '#7fe8ff';
 
 // Leaderboard backend (Supabase PostgREST) -- this is the ONLY part of Maze Dodge
@@ -516,6 +522,7 @@ let runnerGrounded = true;
 let runnerCharging = false;
 let runnerChargeTime = 0;
 let runnerDashOrbs = [];
+let runnerDashBoostTimer = 0;
 
 let lives = LIVES_PER_ATTEMPT;
 let invulnTimer = 0;
@@ -1076,6 +1083,7 @@ function setupRunnerLevel(levelDef) {
   runnerCharging = false;
   runnerChargeTime = 0;
   runnerDashOrbs = (levelDef.dashOrbs || []).map((def) => ({ gaugeX: def.gaugeX, radius: RUNNER_DASH_ORB_RADIUS, used: false }));
+  runnerDashBoostTimer = 0;
   transformAnchor = { x: RUNNER_PLAYER_X, y: RUNNER_GROUND_Y - 14 };
 }
 
@@ -1197,6 +1205,7 @@ function triggerNearestRunnerDashOrb() {
   if (nearest) {
     nearest.used = true;
     invulnTimer = Math.max(invulnTimer, RUNNER_DASH_DURATION);
+    runnerDashBoostTimer = RUNNER_DASH_DURATION;
   }
 }
 
@@ -1372,7 +1381,9 @@ function updateRunner(dt) {
       runnerGrounded = true;
     }
   }
-  runnerScroll += RUNNER_SCROLL_SPEED * dt;
+  if (runnerDashBoostTimer > 0) runnerDashBoostTimer -= dt;
+  const scrollSpeed = runnerDashBoostTimer > 0 ? RUNNER_SCROLL_SPEED * RUNNER_DASH_SCROLL_BOOST_MUL : RUNNER_SCROLL_SPEED;
+  runnerScroll += scrollSpeed * dt;
   checkRunnerCollisions(dt);
   if (phase === Phase.PLAYING) checkRunnerFinish();
 }
@@ -1882,11 +1893,27 @@ function renderRunnerScene() {
     drawRunnerDashOrb(screenX, orb, nowT);
   }
 
-  if (invulnTimer > 0 && runnerDashOrbs.some((o) => o.used)) {
+  if (runnerDashBoostTimer > 0) {
     ctx.save();
     ctx.globalAlpha = 0.12 + 0.06 * Math.sin(nowT / 90);
     ctx.fillStyle = RUNNER_DASH_ORB_COLOR;
     ctx.fillRect(0, RUNNER_CEILING_Y, canvas.width, RUNNER_GROUND_Y - RUNNER_CEILING_Y);
+    ctx.restore();
+
+    // Speed-line streaks (same technique as drawRiverFlow's water streaks) to
+    // sell the scroll-speed boost as a forward burst, not just invulnerability.
+    ctx.save();
+    ctx.strokeStyle = RUNNER_DASH_ORB_COLOR;
+    for (let i = 0; i < 6; i++) {
+      const y = RUNNER_CEILING_Y + 20 + i * ((RUNNER_GROUND_Y - RUNNER_CEILING_Y - 40) / 5);
+      const x = (canvas.width - ((nowT / 2 + i * 130) % (canvas.width + 120)));
+      ctx.globalAlpha = 0.35;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + 60, y);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
