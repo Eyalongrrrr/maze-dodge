@@ -88,6 +88,8 @@ const RUNNER_SPIKE_WIDTH = 26;
 // the level's whole timing design).
 const RUNNER_DASH_ORB_RADIUS = 10;
 const RUNNER_DASH_ORB_PROXIMITY = 40;
+const RUNNER_DASH_ORB_DEFAULT_HEIGHT = 100;
+const RUNNER_DASH_ORB_VERTICAL_TOLERANCE = 20;
 const RUNNER_DASH_DURATION = 2.4;
 const RUNNER_DASH_SCROLL_BOOST_MUL = 1.7;
 const RUNNER_DASH_ORB_COLOR = '#7fe8ff';
@@ -443,7 +445,10 @@ const LEVELS = [
         { gaugeX: 2550, ground: { height: 65 } },
       ],
     },
-    dashOrbs: [{ gaugeX: 1700 }],
+    // height=100 requires a genuine, well-charged jump to reach (a quick tap
+    // only apexes around 33 -- see RUNNER_DASH_ORB_VERTICAL_TOLERANCE) -- the
+    // orb can't be triggered from standing on the ground.
+    dashOrbs: [{ gaugeX: 1700, height: 100 }],
   },
 ];
 
@@ -568,7 +573,12 @@ window.addEventListener('keydown', (e) => {
         // Runner mode overloads Space for two things: it's also the
         // hold-to-charge jump key (see updateRunner), so unlike the maze's
         // Space handling it must still reach `keys` below, not return early.
-        triggerNearestRunnerDashOrb();
+        // e.repeat guards against OS key-auto-repeat re-firing this on every
+        // tick of a held press -- the orb requires a genuine release-and-
+        // repress (typically: hold to charge+launch a jump, then tap again
+        // once airborne at the right height), not an accidental trigger from
+        // however long the browser's repeat delay happens to be.
+        if (!e.repeat) triggerNearestRunnerDashOrb();
       } else {
         triggerNearestDashOrb();
         return;
@@ -1082,7 +1092,12 @@ function setupRunnerLevel(levelDef) {
   runnerGrounded = true;
   runnerCharging = false;
   runnerChargeTime = 0;
-  runnerDashOrbs = (levelDef.dashOrbs || []).map((def) => ({ gaugeX: def.gaugeX, radius: RUNNER_DASH_ORB_RADIUS, used: false }));
+  runnerDashOrbs = (levelDef.dashOrbs || []).map((def) => ({
+    gaugeX: def.gaugeX,
+    height: def.height != null ? def.height : RUNNER_DASH_ORB_DEFAULT_HEIGHT,
+    radius: RUNNER_DASH_ORB_RADIUS,
+    used: false,
+  }));
   runnerDashBoostTimer = 0;
   transformAnchor = { x: RUNNER_PLAYER_X, y: RUNNER_GROUND_Y - 14 };
 }
@@ -1197,7 +1212,8 @@ function triggerNearestRunnerDashOrb() {
   for (const orb of runnerDashOrbs) {
     if (orb.used) continue;
     const dist = Math.abs(orb.gaugeX - runnerScroll);
-    if (dist <= RUNNER_DASH_ORB_PROXIMITY && dist < nearestDist) {
+    const heightOk = Math.abs(runnerHeight - orb.height) <= RUNNER_DASH_ORB_VERTICAL_TOLERANCE;
+    if (dist <= RUNNER_DASH_ORB_PROXIMITY && heightOk && dist < nearestDist) {
       nearest = orb;
       nearestDist = dist;
     }
@@ -1843,7 +1859,7 @@ function drawCeilingSpike(x, height) {
 }
 
 function drawRunnerDashOrb(screenX, orb, t) {
-  const y = (RUNNER_GROUND_Y + RUNNER_CEILING_Y) / 2;
+  const y = RUNNER_GROUND_Y - orb.height;
   ctx.save();
   if (orb.used) {
     ctx.strokeStyle = 'rgba(255,255,255,0.25)';
@@ -1854,7 +1870,8 @@ function drawRunnerDashOrb(screenX, orb, t) {
     ctx.restore();
     return;
   }
-  const near = Math.abs(orb.gaugeX - runnerScroll) <= RUNNER_DASH_ORB_PROXIMITY;
+  const near = Math.abs(orb.gaugeX - runnerScroll) <= RUNNER_DASH_ORB_PROXIMITY
+    && Math.abs(runnerHeight - orb.height) <= RUNNER_DASH_ORB_VERTICAL_TOLERANCE;
   const pulse = 0.8 + 0.2 * Math.sin(t / 220);
   ctx.strokeStyle = RUNNER_DASH_ORB_COLOR;
   ctx.shadowColor = RUNNER_DASH_ORB_COLOR;

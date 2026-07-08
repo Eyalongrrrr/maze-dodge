@@ -55,6 +55,8 @@ RUNNER_PLAYER_HALF_WIDTH = 9
 RUNNER_SPIKE_WIDTH = 26
 RUNNER_PLAYER_HEIGHT = 34  # approximate visual height used for the ceiling AABB, see drawCharacter
 RUNNER_DASH_ORB_PROXIMITY = 40
+RUNNER_DASH_ORB_DEFAULT_HEIGHT = 100
+RUNNER_DASH_ORB_VERTICAL_TOLERANCE = 20
 RUNNER_DASH_DURATION = 2.4
 RUNNER_DASH_SCROLL_BOOST_MUL = 1.7
 
@@ -122,8 +124,10 @@ def load_runner_levels(path=GAME_JS):
         dash_orbs = []
         do_match = re.search(r"dashOrbs:\s*\[(.*?)\]", obj_text, re.S)
         if do_match:
-            for om in re.finditer(r"gaugeX:\s*(\d+)", do_match.group(1)):
-                dash_orbs.append({'gaugeX': int(om.group(1))})
+            for om in re.finditer(r"\{\s*gaugeX:\s*(\d+)(?:,\s*height:\s*(\d+))?\s*\}", do_match.group(1)):
+                gaugeX = int(om.group(1))
+                height = int(om.group(2)) if om.group(2) is not None else RUNNER_DASH_ORB_DEFAULT_HEIGHT
+                dash_orbs.append({'gaugeX': gaugeX, 'height': height})
 
         levels.append({'name': name, 'length': length, 'obstacles': obstacles, 'dashOrbs': dash_orbs})
     return levels
@@ -185,6 +189,40 @@ def obstacle_clearable(ob, samples=300):
         if best + 1e-6 >= needed:
             return True, tau, t_land
     return False, None, None
+
+
+def orb_reachable(orb, samples=300):
+    """
+    Since the orb requires the player to be at a specific height (not just
+    horizontal proximity), find whether some hold duration's flight arc
+    dwells in [orb.height - tolerance, orb.height + tolerance] for at least
+    as long as the horizontal proximity window takes to scroll past (so a
+    real player has genuine timing slack to align the two, not a frame-exact
+    coincidence). Returns (reachable, best_tau, best_dwell).
+    """
+    horizontal_window = 2 * RUNNER_DASH_ORB_PROXIMITY / RUNNER_SCROLL_SPEED
+    lo_h = orb['height'] - RUNNER_DASH_ORB_VERTICAL_TOLERANCE
+    hi_h = orb['height'] + RUNNER_DASH_ORB_VERTICAL_TOLERANCE
+    best_tau, best_dwell = None, 0.0
+    for i in range(samples + 1):
+        tau = RUNNER_MAX_CHARGE_TIME * i / samples
+        vel = RUNNER_MIN_JUMP_VEL + (RUNNER_MAX_JUMP_VEL - RUNNER_MIN_JUMP_VEL) * (tau / RUNNER_MAX_CHARGE_TIME)
+        t_land = flight_duration(vel)
+        dt = 1 / 480
+        cur, dwell = 0.0, 0.0
+        t = 0.0
+        while t <= t_land:
+            h = height_at(vel, t)
+            if lo_h <= h <= hi_h:
+                cur += dt
+                dwell = max(dwell, cur)
+            else:
+                cur = 0.0
+            t += dt
+        if dwell > best_dwell:
+            best_dwell = dwell
+            best_tau = tau
+    return best_dwell >= horizontal_window, best_tau, best_dwell
 
 
 def dash_group_coverage(group, orb):
@@ -270,6 +308,15 @@ def report_level(level):
                 continue
             orb = dash_orbs[orb_idx]
             orb_idx += 1
+            reachable, best_tau, best_dwell = orb_reachable(orb)
+            if reachable:
+                print(f"  ORB@{orb['gaugeX']} height={orb['height']}: reachable=True "
+                      f"best_tau={best_tau:.3f}s dwell={best_dwell:.3f}s -> OK")
+            else:
+                print(f"  ORB@{orb['gaugeX']} height={orb['height']}: reachable=False -> FAIL "
+                      f"(no hold duration's flight arc dwells in the height band long enough "
+                      f"to line up with the horizontal proximity window)")
+                all_ok = False
             ok, (lo, hi) = dash_group_coverage(group, orb)
             if ok:
                 print(f"  DASH GROUP [{span}] via orb@{orb['gaugeX']}: coverable=True "
