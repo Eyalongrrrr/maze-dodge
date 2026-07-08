@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Maze Dodge</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="gameContainer">
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <div id="hud" class="hidden">
+      <span id="levelLabel">Level 1</span>
+      <div class="hudRight">
+        <span id="gemsLabel">Gems: 0/0</span>
+        <span id="timeLabel">Time: 0.0s</span>
+        <span id="bestLabel">Best: --</span>
+        <span id="livesLabel">Lives: 3</span>
+      </div>
+    </div>
+
+    <div id="banner" class="hidden"></div>
+
+    <button id="leaderboardBtn" class="hidden">Leaderboard</button>
+
+    <div id="usernameScreen" class="overlay hidden">
+      <h1>Who's Climbing?</h1>
+      <p class="hint">Pick a name for the leaderboard. You can change it later.</p>
+      <input id="usernameInput" type="text" maxlength="20" placeholder="Your name" autocomplete="off" />
+      <p id="usernameError" class="hint error hidden">Enter a name (1-20 characters).</p>
+      <button id="usernameContinueBtn">Continue</button>
+    </div>
+
+    <div id="startScreen" class="overlay hidden">
+      <h1>Maze Dodge</h1>
+      <p class="story">
+        He's setting off across the range, village to village — and he's
+        learned that becoming small and quick gets him through the
+        narrowest places.
+      </p>
+      <p class="hint">WASD / Arrow Keys to move. Reach the glowing gate. Mind the wandering lights.</p>
+      <button id="beginBtn">Begin</button>
+    </div>
+
+    <div id="pauseScreen" class="overlay hidden">
+      <h1>Paused</h1>
+      <button id="resumeBtn">Resume</button>
+      <button id="exitToMapBtn">Exit to Map</button>
+    </div>
+
+    <div id="leaderboardScreen" class="overlay hidden">
+      <h1>Leaderboard</h1>
+      <select id="leaderboardLevelSelect"></select>
+      <div id="leaderboardList">Leaderboard unavailable.</div>
+      <button id="leaderboardCloseBtn">Close</button>
+    </div>
+  </div>
+
+  <script src="game.js" defer></script>
+</body>
+</html>
