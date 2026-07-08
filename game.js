@@ -546,6 +546,13 @@ let walls = [];
 let hazards = [];
 let collectibles = [];
 let runGemCount = 0;
+// Attempt-scoped gem progress -- starts as a copy of progress.gemsCollected[level]
+// (so already-permanently-banked gems still show collected), but new pickups
+// only mutate this, not progress.gemsCollected directly. Reset to that same
+// starting copy on death (see respawnInLevel), discarding this attempt's
+// new pickups; only copied into progress.gemsCollected (and saved) in
+// finishLevel() if every gem was collected in one clean, death-free run.
+let runGemFlags = [];
 let levelTimer = 0;
 let dashOrbs = [];
 let dashTimer = 0;
@@ -1271,7 +1278,8 @@ function enterLevel(index) {
   collectibles = (levelDef.collectibles || []).map((def, i) => ({
     x: def.x, y: def.y, radius: COLLECTIBLE_RADIUS, index: i,
   }));
-  runGemCount = progress.gemsCollected[index].filter(Boolean).length;
+  runGemFlags = progress.gemsCollected[index].slice();
+  runGemCount = runGemFlags.filter(Boolean).length;
   levelTimer = 0;
   lives = LIVES_PER_ATTEMPT;
   invulnTimer = INVULN_TIME;
@@ -1290,6 +1298,13 @@ function enterLevel(index) {
 
 function respawnInLevel() {
   const levelDef = LEVELS[currentLevelIndex];
+  // A death discards this attempt's new gem pickups -- revert to only what
+  // was already permanently banked (from a past clean run) before this
+  // attempt started, not zero, so replaying an already-100%-cleared level
+  // still shows those as collected.
+  runGemFlags = progress.gemsCollected[currentLevelIndex].slice();
+  runGemCount = runGemFlags.filter(Boolean).length;
+  gemsLabel.textContent = `Gems: ${runGemCount}/${collectibles.length}`;
   if (levelDef.mode === 'runner') {
     setupRunnerLevel(levelDef);
     invulnTimer = INVULN_TIME;
@@ -1474,14 +1489,15 @@ function checkNearMiss(dt) {
 }
 
 function checkCollectiblePickups() {
-  const flags = progress.gemsCollected[currentLevelIndex];
+  // Mutates runGemFlags (this attempt's progress), not progress.gemsCollected
+  // directly -- see finishLevel() for where a clean run's pickups actually
+  // get banked, and respawnInLevel() for where a death discards them.
   for (const g of collectibles) {
-    if (flags[g.index]) continue;
+    if (runGemFlags[g.index]) continue;
     if (circlesOverlap(player, g)) {
-      flags[g.index] = true;
+      runGemFlags[g.index] = true;
       runGemCount++;
       gemsLabel.textContent = `Gems: ${runGemCount}/${collectibles.length}`;
-      saveProgress();
     }
   }
 }
@@ -1497,14 +1513,16 @@ function checkCollectiblePickups() {
 // right at the boundary of a player-center-to-gem distance check, so a
 // frame landing 1-2px off horizontally was enough to miss it entirely).
 function checkRunnerCollectiblePickups() {
-  const flags = progress.gemsCollected[currentLevelIndex];
+  // Mutates runGemFlags (this attempt's progress), not progress.gemsCollected
+  // directly -- see finishLevel() for where a clean run's pickups actually
+  // get banked, and respawnInLevel() for where a death discards them.
   const feetY = RUNNER_GROUND_Y - runnerHeight;
   const playerLeft = RUNNER_PLAYER_X - RUNNER_PLAYER_HALF_WIDTH;
   const playerRight = RUNNER_PLAYER_X + RUNNER_PLAYER_HALF_WIDTH;
   const playerTop = feetY - RUNNER_PLAYER_HEIGHT;
   const playerBottom = feetY;
   for (const g of runnerCollectibles) {
-    if (flags[g.index]) continue;
+    if (runGemFlags[g.index]) continue;
     const screenX = RUNNER_PLAYER_X + (g.gaugeX - runnerScroll);
     const gemLeft = screenX - g.radius;
     const gemRight = screenX + g.radius;
@@ -1513,10 +1531,9 @@ function checkRunnerCollectiblePickups() {
     const gemTop = gemY - g.radius;
     const gemBottom = gemY + g.radius;
     if (gemBottom < playerTop || gemTop > playerBottom) continue;
-    flags[g.index] = true;
+    runGemFlags[g.index] = true;
     runGemCount++;
     gemsLabel.textContent = `Gems: ${runGemCount}/${collectibles.length}`;
-    saveProgress();
   }
 }
 
@@ -1531,6 +1548,15 @@ function finishLevel() {
   const prevBest = progress.bestTimes[currentLevelIndex];
   const isNewBest = prevBest == null || finishTime < prevBest;
   if (isNewBest) progress.bestTimes[currentLevelIndex] = finishTime;
+  // Gems only permanently bank on a clean, all-collected-in-one-life run --
+  // a death reverts runGemFlags (see respawnInLevel()), discarding this
+  // attempt's new pickups, and the pickup functions only ever mutate
+  // runGemFlags, never progress.gemsCollected directly. An empty
+  // collectibles list (e.g. a level with no gems) trivially "passes" but
+  // there's nothing to bank either way.
+  if (runGemFlags.length > 0 && runGemFlags.every(Boolean)) {
+    progress.gemsCollected[currentLevelIndex] = runGemFlags.slice();
+  }
   saveProgress();
   if (isNewBest && username) submitScore(currentLevelIndex, username, finishTime);
   // If this completion just unlocked a new world, hop the map view there so
@@ -1751,8 +1777,7 @@ function drawVillageGate(x, y, radius, t) {
 }
 
 function drawCollectible(g, t) {
-  const flags = progress.gemsCollected[currentLevelIndex];
-  if (flags[g.index]) return;
+  if (runGemFlags[g.index]) return;
   const pulse = 0.85 + 0.15 * Math.sin(t / 260 + g.index);
   ctx.save();
   ctx.translate(g.x, g.y);
