@@ -966,16 +966,20 @@ function buildMapBackground() {
   mapBackgroundCanvas = off;
 }
 
-// World 2's background reuses the mountain map's ridgeline technique
-// (hashCell/generateRidgeline/drawRidgeLayer are already seed+palette
-// parameterized) with a dark cavern palette in place of sky/river/pines.
-// A single-node world has no river and nothing to connect a trail between,
-// so drawRiver/drawTrail are deliberately skipped here, not forgotten.
+// World 2's background reuses the mountain map's dark-gradient/torch-glow
+// technique and hashCell-seeded scatter approach, but its rock silhouette
+// is its own generateCaveWallOutline/drawCaveWallLayer (below) -- NOT
+// generateRidgeline/drawRidgeLayer. Those produce sharp triangular peaks,
+// which read as mountains regardless of palette; caves need rounded bumpy
+// walls instead, so this is a deliberate sibling implementation, not a
+// missed reuse opportunity. A single-node world has no river and nothing
+// to connect a trail between, so drawRiver/drawTrail are deliberately
+// skipped here, not forgotten.
 const CAVERN_LAYERS = [
-  { baseY: 200, amplitude: 40, color: '#2a2438', snow: 0 },
-  { baseY: 250, amplitude: 55, color: '#221c30', snow: 0 },
-  { baseY: 305, amplitude: 68, color: '#1a1526', snow: 0 },
-  { baseY: 365, amplitude: 85, color: '#120e1c', snow: 0 },
+  { baseY: 200, amplitude: 40, color: '#2a2438' },
+  { baseY: 250, amplitude: 55, color: '#221c30' },
+  { baseY: 305, amplitude: 68, color: '#1a1526' },
+  { baseY: 365, amplitude: 85, color: '#120e1c' },
 ];
 const CAVE_FLOOR_TOP = '#1c1626';
 const CAVE_FLOOR_BOTTOM = '#0d0a14';
@@ -998,6 +1002,63 @@ function drawCaveGlow(octx) {
     octx.arc(t.x, t.y, 90, 0, Math.PI * 2);
     octx.fill();
   });
+}
+
+// Same hashed-point idea as generateRidgeline, but connected with
+// quadraticCurveTo through each segment's midpoint (a standard canvas trick
+// for a smooth wavy/bumpy line) instead of lineTo -- rounded rock-wall bumps
+// instead of sharp mountain-peak triangles.
+function generateCaveWallOutline(seed, baseY, amplitude, bumpCount) {
+  const points = [{ x: 0, y: baseY }];
+  const step = canvas.width / bumpCount;
+  for (let i = 0; i <= bumpCount; i++) {
+    const x = i * step;
+    const y = baseY - amplitude * (0.3 + 0.7 * hashCell(seed, i, 7));
+    points.push({ x, y });
+  }
+  points.push({ x: canvas.width, y: baseY });
+  return points;
+}
+
+function drawCaveWallLayer(octx, layer, seed) {
+  const points = generateCaveWallOutline(seed, layer.baseY, layer.amplitude, 6);
+  octx.beginPath();
+  octx.moveTo(0, canvas.height);
+  octx.lineTo(points[0].x, points[0].y);
+  for (let i = 0; i < points.length - 1; i++) {
+    const cur = points[i];
+    const next = points[i + 1];
+    octx.quadraticCurveTo(cur.x, cur.y, (cur.x + next.x) / 2, (cur.y + next.y) / 2);
+  }
+  octx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+  octx.lineTo(canvas.width, canvas.height);
+  octx.closePath();
+  octx.fillStyle = layer.color;
+  octx.fill();
+}
+
+// Hanging from the ceiling -- one of the most immediately recognizable
+// "you are inside a cave" cues, and previously entirely absent (nothing at
+// all occupied the top of the screen). Seeded like every other decoration
+// in this file (pine trees, crystals, trail pebbles); avoids CAVERN_PATH
+// node positions the same way the crystal-cluster scatter does.
+function drawStalactites(octx) {
+  for (let i = 0; i < 14; i++) {
+    const x = hashCell(i, 1, 301) * canvas.width;
+    const depth = 30 + hashCell(i, 2, 301) * 75;
+    const width = 14 + hashCell(i, 3, 301) * 20;
+    const tooClose = CAVERN_PATH.some((n) => Math.hypot(n.x - x, n.y - depth / 2) < 60);
+    if (tooClose) continue;
+    octx.save();
+    octx.fillStyle = CAVE_FLOOR_BOTTOM;
+    octx.beginPath();
+    octx.moveTo(x - width / 2, 0);
+    octx.quadraticCurveTo(x, depth * 0.4, x, depth);
+    octx.quadraticCurveTo(x, depth * 0.4, x + width / 2, 0);
+    octx.closePath();
+    octx.fill();
+    octx.restore();
+  }
 }
 
 function drawCrystalCluster(octx, x, y, size) {
@@ -1027,7 +1088,8 @@ function buildCavernMapBackground() {
   const octx = off.getContext('2d');
 
   drawCaveGlow(octx);
-  CAVERN_LAYERS.forEach((layer, i) => drawRidgeLayer(octx, layer, i + 101));
+  CAVERN_LAYERS.forEach((layer, i) => drawCaveWallLayer(octx, layer, i + 101));
+  drawStalactites(octx);
 
   const floor = octx.createLinearGradient(0, 400, 0, 600);
   floor.addColorStop(0, CAVE_FLOOR_TOP);
