@@ -18,6 +18,11 @@ const usernameScreen = document.getElementById('usernameScreen');
 const usernameInput = document.getElementById('usernameInput');
 const usernameError = document.getElementById('usernameError');
 const usernameContinueBtn = document.getElementById('usernameContinueBtn');
+const usernameBtn = document.getElementById('usernameBtn');
+const usernameTakenScreen = document.getElementById('usernameTakenScreen');
+const usernameTakenText = document.getElementById('usernameTakenText');
+const usernameTakenYesBtn = document.getElementById('usernameTakenYesBtn');
+const usernameTakenNoBtn = document.getElementById('usernameTakenNoBtn');
 const leaderboardBtn = document.getElementById('leaderboardBtn');
 const leaderboardScreen = document.getElementById('leaderboardScreen');
 const leaderboardLevelSelect = document.getElementById('leaderboardLevelSelect');
@@ -683,6 +688,7 @@ beginBtn.addEventListener('click', () => {
   startScreen.classList.add('hidden');
   phase = Phase.MENU;
   leaderboardBtn.classList.remove('hidden');
+  usernameBtn.classList.remove('hidden');
 });
 
 resumeBtn.addEventListener('click', () => {
@@ -1294,6 +1300,7 @@ function enterLevel(index) {
   phase = Phase.TRANSFORM_IN;
   hud.classList.add('hidden');
   leaderboardBtn.classList.add('hidden');
+  usernameBtn.classList.add('hidden');
 }
 
 function respawnInLevel() {
@@ -1654,6 +1661,7 @@ function update(dt) {
     if (transformTimer >= TRANSFORM_TIME) {
       phase = Phase.MENU;
       leaderboardBtn.classList.remove('hidden');
+      usernameBtn.classList.remove('hidden');
     }
   }
 }
@@ -2291,23 +2299,93 @@ leaderboardLevelSelect.addEventListener('change', refreshLeaderboardList);
 function saveUsername(name) {
   username = name;
   localStorage.setItem(USERNAME_KEY, name);
+  usernameBtn.textContent = `👤 ${username}`;
 }
 
-usernameContinueBtn.addEventListener('click', () => {
+// Checks the shared leaderboard table for an existing row under this name --
+// there's no real account/ownership system (see the leaderboard's documented
+// "no real auth, top runs board" limitation), so "taken" just means someone
+// has submitted a score under it before, not a reserved identity. Network
+// failure or an unconfigured backend degrades to "not taken" (never blocks
+// picking a name), matching every other Supabase call in this file.
+async function isUsernameTaken(name) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return false;
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/leaderboard?username=ilike.${encodeURIComponent(name)}&select=username&limit=1`;
+    const res = await fetch(url, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+    });
+    if (!res.ok) return false;
+    const rows = await res.json();
+    return rows.length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 'setup' (first-time, before startScreen has ever been shown) vs 'change'
+// (opened later via usernameBtn) -- only 'setup' should reveal startScreen
+// once done; 'change' just closes back to whatever's already on screen.
+let usernameFlowMode = 'setup';
+let pendingUsername = '';
+
+function finishUsernameFlow(name) {
+  saveUsername(name);
+  usernameScreen.classList.add('hidden');
+  if (usernameFlowMode === 'setup') {
+    startScreen.classList.remove('hidden');
+  }
+}
+
+usernameContinueBtn.addEventListener('click', async () => {
   const trimmed = usernameInput.value.trim();
   if (trimmed.length < 1 || trimmed.length > 20) {
     usernameError.classList.remove('hidden');
     return;
   }
   usernameError.classList.add('hidden');
-  saveUsername(trimmed);
-  usernameScreen.classList.add('hidden');
-  startScreen.classList.remove('hidden');
+  if (trimmed === username) {
+    // No actual change -- skip the network round-trip, nothing to check.
+    finishUsernameFlow(trimmed);
+    return;
+  }
+  usernameContinueBtn.disabled = true;
+  const taken = await isUsernameTaken(trimmed);
+  usernameContinueBtn.disabled = false;
+  if (taken) {
+    pendingUsername = trimmed;
+    usernameTakenText.textContent = `"${trimmed}" is already taken. Use it anyway?`;
+    usernameScreen.classList.add('hidden');
+    usernameTakenScreen.classList.remove('hidden');
+    return;
+  }
+  finishUsernameFlow(trimmed);
+});
+
+usernameTakenYesBtn.addEventListener('click', () => {
+  usernameTakenScreen.classList.add('hidden');
+  finishUsernameFlow(pendingUsername);
+});
+
+usernameTakenNoBtn.addEventListener('click', () => {
+  usernameTakenScreen.classList.add('hidden');
+  usernameScreen.classList.remove('hidden');
+  usernameInput.value = '';
+  usernameInput.focus();
+});
+
+usernameBtn.addEventListener('click', () => {
+  usernameFlowMode = 'change';
+  usernameInput.value = username;
+  usernameError.classList.add('hidden');
+  usernameScreen.classList.remove('hidden');
 });
 
 if (username) {
   startScreen.classList.remove('hidden');
+  usernameBtn.textContent = `👤 ${username}`;
 } else {
+  usernameFlowMode = 'setup';
   usernameScreen.classList.remove('hidden');
 }
 

@@ -168,3 +168,30 @@ canvas {
 #leaderboardBtn:hover {
   background: #63bcff;
 }
+
+#usernameBtn {
+  position: absolute;
+  top: 56px;
+  left: 12px;
+  padding: 8px 16px;
+  font-size: 0.9em;
+  border: none;
+  border-radius: 6px;
+  background: rgba(63, 169, 245, 0.85);
+  color: #08111d;
+  font-weight: 600;
+  cursor: pointer;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#usernameBtn:hover {
+  background: #63bcff;
+}
+
+.btnRow {
+  display: flex;
+  gap: 12px;
+}
