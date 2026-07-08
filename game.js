@@ -397,6 +397,19 @@ const LEVELS = [
         { gaugeX: 2150, ground: { height: 90 } },
       ],
     },
+    // Grounded (300, 1050) sit in the gaps between obstacle danger spans --
+    // zero risk. The gaugeX=890 gem sits on the arc of the jump already
+    // needed to clear the gaugeX=850 obstacle, no separate action required.
+    // The gaugeX=1800 gem sits inside that obstacle's own narrow safe band
+    // ([32,54]) -- collecting it demands the same precision the gap itself
+    // already demands, not extra risk on top. See
+    // tools/runner_solvability_checker.py's gem checks for the exact bounds.
+    collectibles: [
+      { gaugeX: 300, height: 0 },
+      { gaugeX: 890, height: 90 },
+      { gaugeX: 1050, height: 0 },
+      { gaugeX: 1800, height: 45 },
+    ],
   },
   {
     name: 'The Narrows',
@@ -449,6 +462,18 @@ const LEVELS = [
     // only apexes around 33 -- see RUNNER_DASH_ORB_VERTICAL_TOLERANCE) -- the
     // orb can't be triggered from standing on the ground.
     dashOrbs: [{ gaugeX: 1700, height: 100 }],
+    // Grounded (300) and risk/reward (900, inside that gap's [30,50] safe
+    // band) mirror The Long Drop's pattern. The gaugeX=2000 gem sits deep
+    // inside the tunnel at height=0 -- picking it up needs no extra jump,
+    // just successfully riding the dash's invulnerability through (which by
+    // then comfortably covers well past the tunnel's end either way), a
+    // bonus for pulling off the harder mechanic rather than an extra risk.
+    collectibles: [
+      { gaugeX: 300, height: 0 },
+      { gaugeX: 530, height: 65 },
+      { gaugeX: 900, height: 40 },
+      { gaugeX: 2000, height: 0 },
+    ],
   },
 ];
 
@@ -540,6 +565,7 @@ let runnerCharging = false;
 let runnerChargeTime = 0;
 let runnerDashOrbs = [];
 let runnerDashBoostTimer = 0;
+let runnerCollectibles = [];
 
 let lives = LIVES_PER_ATTEMPT;
 let invulnTimer = 0;
@@ -1216,6 +1242,13 @@ function setupRunnerLevel(levelDef) {
     used: false,
   }));
   runnerDashBoostTimer = 0;
+  // Rebuilt fresh every call, same as runnerDashOrbs -- but unlike orbs,
+  // gems' "collected" state was never on this runtime object to begin with
+  // (see checkRunnerCollectiblePickups, which reads progress.gemsCollected),
+  // so rebuilding the position list on respawn doesn't un-collect anything.
+  runnerCollectibles = (levelDef.collectibles || []).map((def, i) => ({
+    gaugeX: def.gaugeX, height: def.height || 0, radius: COLLECTIBLE_RADIUS, index: i,
+  }));
   transformAnchor = { x: RUNNER_PLAYER_X, y: RUNNER_GROUND_Y - 14 };
 }
 
@@ -1453,6 +1486,40 @@ function checkCollectiblePickups() {
   }
 }
 
+// Runner-mode counterpart: player.x/y is frozen at a fixed screen position
+// in this mode (the world scrolls, not the player), so circlesOverlap(player,
+// g) against a world {x,y} would never fire -- compares runnerScroll/
+// runnerHeight against a gem's {gaugeX, height} instead, same coordinate
+// model the dash orb already uses. Uses an AABB overlap (full player body
+// extent, not a single center point) matching checkRunnerCollisions'
+// existing style -- an earlier circle-distance-from-center version produced
+// real near-misses at typical frame step sizes (e.g. a grounded gem sat
+// right at the boundary of a player-center-to-gem distance check, so a
+// frame landing 1-2px off horizontally was enough to miss it entirely).
+function checkRunnerCollectiblePickups() {
+  const flags = progress.gemsCollected[currentLevelIndex];
+  const feetY = RUNNER_GROUND_Y - runnerHeight;
+  const playerLeft = RUNNER_PLAYER_X - RUNNER_PLAYER_HALF_WIDTH;
+  const playerRight = RUNNER_PLAYER_X + RUNNER_PLAYER_HALF_WIDTH;
+  const playerTop = feetY - RUNNER_PLAYER_HEIGHT;
+  const playerBottom = feetY;
+  for (const g of runnerCollectibles) {
+    if (flags[g.index]) continue;
+    const screenX = RUNNER_PLAYER_X + (g.gaugeX - runnerScroll);
+    const gemLeft = screenX - g.radius;
+    const gemRight = screenX + g.radius;
+    if (gemRight < playerLeft || gemLeft > playerRight) continue;
+    const gemY = RUNNER_GROUND_Y - g.height;
+    const gemTop = gemY - g.radius;
+    const gemBottom = gemY + g.radius;
+    if (gemBottom < playerTop || gemTop > playerBottom) continue;
+    flags[g.index] = true;
+    runGemCount++;
+    gemsLabel.textContent = `Gems: ${runGemCount}/${collectibles.length}`;
+    saveProgress();
+  }
+}
+
 // Shared by both the maze exit-gate path and the runner gauntlet-clear path.
 function finishLevel() {
   const isLast = currentLevelIndex === LEVELS.length - 1;
@@ -1517,6 +1584,7 @@ function updateRunner(dt) {
   if (runnerDashBoostTimer > 0) runnerDashBoostTimer -= dt;
   const scrollSpeed = runnerDashBoostTimer > 0 ? RUNNER_SCROLL_SPEED * RUNNER_DASH_SCROLL_BOOST_MUL : RUNNER_SCROLL_SPEED;
   runnerScroll += scrollSpeed * dt;
+  checkRunnerCollectiblePickups();
   checkRunnerCollisions(dt);
   if (phase === Phase.PLAYING) checkRunnerFinish();
 }
@@ -2049,6 +2117,12 @@ function renderRunnerScene() {
     const screenX = RUNNER_PLAYER_X + (orb.gaugeX - runnerScroll);
     if (screenX < -RUNNER_DASH_ORB_RADIUS || screenX > canvas.width + RUNNER_DASH_ORB_RADIUS) continue;
     drawRunnerDashOrb(screenX, orb, nowT);
+  }
+
+  for (const g of runnerCollectibles) {
+    const screenX = RUNNER_PLAYER_X + (g.gaugeX - runnerScroll);
+    if (screenX < -20 || screenX > canvas.width + 20) continue;
+    drawCollectible({ x: screenX, y: RUNNER_GROUND_Y - g.height, radius: g.radius, index: g.index }, nowT);
   }
 
   if (runnerDashBoostTimer > 0) {

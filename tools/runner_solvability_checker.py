@@ -129,7 +129,13 @@ def load_runner_levels(path=GAME_JS):
                 height = int(om.group(2)) if om.group(2) is not None else RUNNER_DASH_ORB_DEFAULT_HEIGHT
                 dash_orbs.append({'gaugeX': gaugeX, 'height': height})
 
-        levels.append({'name': name, 'length': length, 'obstacles': obstacles, 'dashOrbs': dash_orbs})
+        collectibles = []
+        co_match = re.search(r"collectibles:\s*\[(.*?)\]", obj_text, re.S)
+        if co_match:
+            for cm in re.finditer(r"\{\s*gaugeX:\s*(\d+),\s*height:\s*(\d+)\s*\}", co_match.group(1)):
+                collectibles.append({'gaugeX': int(cm.group(1)), 'height': int(cm.group(2))})
+
+        levels.append({'name': name, 'length': length, 'obstacles': obstacles, 'dashOrbs': dash_orbs, 'collectibles': collectibles})
     return levels
 
 
@@ -274,6 +280,48 @@ def check_spacing(pairs):
     return ok
 
 
+def check_gem_placements(obstacles, collectibles):
+    """
+    Geometric sanity check per gem: if it horizontally overlaps an obstacle's
+    danger span, its height must fall inside that obstacle's own safe band
+    (the same band a player must already pass through to clear the
+    obstacle) -- a gem inside the ground spike's blocked zone or above the
+    ceiling spike's safe max would be flatly uncollectable. A gem with no
+    horizontal overlap is either a grounded/breather pickup (trivially safe)
+    or a mid-air one whose exact reachability still needs the CDP playtest
+    (this check can't simulate "does some jump's arc pass through here" on
+    its own -- see the CLAUDE.md note on this). A gem overlapping a
+    dash-gated obstacle is exempt from the height check entirely -- no
+    height clears those by design, so it's only safe under the dash's
+    invulnerability, which report_level's DASH GROUP coverage check already
+    proves spans the *whole* group's danger range (any gem inside that same
+    range is covered too).
+    """
+    results = []
+    for g in collectibles:
+        overlapping = None
+        for ob in obstacles:
+            lo, hi = obstacle_danger_span(ob)
+            if lo <= g['gaugeX'] <= hi:
+                overlapping = ob
+                break
+        if overlapping is None:
+            tag = "grounded" if g['height'] <= 15 else "mid-air, clear of obstacles horizontally"
+            results.append((g, True, tag))
+            continue
+        ob = overlapping
+        if is_dash_gated(ob):
+            results.append((g, True, f"inside dash-gated obstacle@{ob['gaugeX']}'s span -- covered by that group's dash-coverage check, not a height check"))
+            continue
+        ceiling_safe_max = None
+        if ob['ceiling'] is not None:
+            ceiling_safe_max = RUNNER_GROUND_Y - RUNNER_PLAYER_HEIGHT - RUNNER_CEILING_Y - ob['ceiling']
+        ok = g['height'] >= ob['ground'] and (ceiling_safe_max is None or g['height'] <= ceiling_safe_max)
+        band = f"[{ob['ground']},{ceiling_safe_max if ceiling_safe_max is not None else 'inf'}]"
+        results.append((g, ok, f"{'within' if ok else 'OUTSIDE'} obstacle@{ob['gaugeX']}'s safe band {band}"))
+    return results
+
+
 def report_level(level):
     name, length, obstacles, dash_orbs = level['name'], level['length'], level['obstacles'], level['dashOrbs']
     print(f"=== {name} === gauntlet length={length}, {len(obstacles)} obstacles, {len(dash_orbs)} dash orb(s)")
@@ -335,6 +383,14 @@ def report_level(level):
     if length < obstacles[-1]['gaugeX'] + 200:
         print(f"  WARNING: gauntlet.length ({length}) is close to/less than the last obstacle's "
               f"gaugeX ({obstacles[-1]['gaugeX']}) + landing margin -- finish line may trigger mid-jump")
+
+    collectibles = level.get('collectibles', [])
+    if collectibles:
+        for g, ok, reason in check_gem_placements(obstacles, collectibles):
+            status = "OK" if ok else "FAIL"
+            print(f"  gem@({g['gaugeX']},{g['height']}): {reason} -> {status}")
+            if not ok:
+                all_ok = False
 
     print(f"  {name}: ALL CLEARABLE/COVERABLE AND FAIRLY SPACED: {all_ok}")
     return all_ok
