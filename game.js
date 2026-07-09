@@ -28,6 +28,10 @@ const leaderboardScreen = document.getElementById('leaderboardScreen');
 const leaderboardLevelSelect = document.getElementById('leaderboardLevelSelect');
 const leaderboardList = document.getElementById('leaderboardList');
 const leaderboardCloseBtn = document.getElementById('leaderboardCloseBtn');
+const analyticsBtn = document.getElementById('analyticsBtn');
+const analyticsScreen = document.getElementById('analyticsScreen');
+const analyticsList = document.getElementById('analyticsList');
+const analyticsCloseBtn = document.getElementById('analyticsCloseBtn');
 
 const Phase = { START: 'start', MENU: 'menu', TRANSFORM_IN: 'transform_in', PLAYING: 'playing', TRANSFORM_OUT: 'transform_out', PAUSED: 'paused' };
 let phase = Phase.START;
@@ -170,6 +174,15 @@ function worldIndexForLevel(levelIdx) {
 }
 
 const PROGRESS_KEY = 'mazeDodgeProgress';
+
+// Local-only play-session history (this device/browser only, no backend).
+// A "session" is page-open to page-close/idle: currentSession.lastActiveAt
+// is bumped on a heartbeat interval rather than relying on a beforeunload
+// event, so session length is accurate even on a crash/hard-close -- it
+// just freezes at whatever lastActiveAt was last written.
+const SESSIONS_KEY = 'mazeDodgeSessions';
+const MAX_SESSIONS = 200;
+const SESSION_HEARTBEAT_MS = 5000;
 
 const LEVELS = [
   {
@@ -533,6 +546,37 @@ function saveProgress() {
 let progress = loadProgress();
 let username = localStorage.getItem(USERNAME_KEY) || '';
 
+function loadSessions() {
+  try {
+    const raw = localStorage.getItem(SESSIONS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveSessions() {
+  // Cap history so localStorage doesn't grow unbounded over long-term play.
+  if (sessions.length > MAX_SESSIONS) sessions = sessions.slice(sessions.length - MAX_SESSIONS);
+  localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+}
+
+let sessions = loadSessions();
+let currentSession = {
+  username: username || '(no name)',
+  startedAt: Date.now(),
+  lastActiveAt: Date.now(),
+  stagesCompleted: 0,
+};
+sessions.push(currentSession);
+saveSessions();
+
+setInterval(() => {
+  currentSession.lastActiveAt = Date.now();
+  saveSessions();
+}, SESSION_HEARTBEAT_MS);
+
 // Which world's map is currently displayed. Defaults to the player's frontier
 // world but stays put once the player manually browses to the other one (so
 // mopping up missed gems on an earlier world doesn't get yanked back) --
@@ -694,6 +738,7 @@ beginBtn.addEventListener('click', () => {
   phase = Phase.MENU;
   leaderboardBtn.classList.remove('hidden');
   usernameBtn.classList.remove('hidden');
+  analyticsBtn.classList.remove('hidden');
 });
 
 resumeBtn.addEventListener('click', () => {
@@ -1369,6 +1414,16 @@ function formatTime(seconds) {
   return m > 0 ? `${m}:${s.padStart(4, '0')}` : `${s}s`;
 }
 
+function formatDuration(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 function showBanner(text, seconds) {
   bannerEl.textContent = text;
   bannerEl.classList.remove('hidden');
@@ -1440,6 +1495,7 @@ function enterLevel(index) {
   hud.classList.add('hidden');
   leaderboardBtn.classList.add('hidden');
   usernameBtn.classList.add('hidden');
+  analyticsBtn.classList.add('hidden');
 }
 
 function respawnInLevel() {
@@ -1685,6 +1741,10 @@ function checkRunnerCollectiblePickups() {
 
 // Shared by both the maze exit-gate path and the runner gauntlet-clear path.
 function finishLevel() {
+  currentSession.stagesCompleted++;
+  currentSession.lastActiveAt = Date.now();
+  saveSessions();
+
   const isLast = currentLevelIndex === LEVELS.length - 1;
   progress.completedLevels[currentLevelIndex] = true;
   if (progress.unlockedIndex === currentLevelIndex && currentLevelIndex < LEVELS.length - 1) {
@@ -1801,6 +1861,7 @@ function update(dt) {
       phase = Phase.MENU;
       leaderboardBtn.classList.remove('hidden');
       usernameBtn.classList.remove('hidden');
+      analyticsBtn.classList.remove('hidden');
     }
   }
 }
@@ -2483,10 +2544,59 @@ leaderboardCloseBtn.addEventListener('click', () => {
 });
 leaderboardLevelSelect.addEventListener('change', refreshLeaderboardList);
 
+function renderAnalyticsList() {
+  // Reflect "now" for the still-in-progress current session rather than
+  // waiting for the next heartbeat tick.
+  currentSession.lastActiveAt = Date.now();
+  saveSessions();
+
+  if (sessions.length === 0) {
+    analyticsList.textContent = 'No sessions yet.';
+    return;
+  }
+  analyticsList.innerHTML = '';
+  // Most recent first.
+  sessions.slice().reverse().forEach((s) => {
+    const div = document.createElement('div');
+    div.className = 'row' + (s === currentSession ? ' me' : '');
+    const when = new Date(s.startedAt).toLocaleString();
+    const length = formatDuration(s.lastActiveAt - s.startedAt);
+    div.textContent = `${when} — ${s.username} — ${length} — ${s.stagesCompleted} stage${s.stagesCompleted === 1 ? '' : 's'}`;
+    analyticsList.appendChild(div);
+  });
+}
+
+function openAnalytics() {
+  analyticsScreen.classList.remove('hidden');
+  renderAnalyticsList();
+}
+
+analyticsBtn.addEventListener('click', openAnalytics);
+analyticsCloseBtn.addEventListener('click', () => {
+  analyticsScreen.classList.add('hidden');
+});
+
 function saveUsername(name) {
+  // A real rename (not first-time setup) splits into a new session instead
+  // of relabeling currentSession in place -- it's a live reference already
+  // sitting in `sessions`, so mutating its username would retroactively
+  // rewrite time already accumulated under the old name to the new one.
+  if (username && username !== name) {
+    currentSession.lastActiveAt = Date.now();
+    currentSession = {
+      username: name,
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+      stagesCompleted: 0,
+    };
+    sessions.push(currentSession);
+  } else {
+    currentSession.username = name;
+  }
   username = name;
   localStorage.setItem(USERNAME_KEY, name);
   usernameBtn.textContent = `👤 ${username}`;
+  saveSessions();
 }
 
 // Checks the shared leaderboard table for an existing row under this name --
