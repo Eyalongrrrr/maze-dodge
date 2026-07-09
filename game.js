@@ -109,18 +109,18 @@ const SUPABASE_ANON_KEY = 'sb_publishable_ECQR6xKUxbBz5zSdLkEe6w_FyD7kvy3';
 const LEADERBOARD_LIMIT = 10;
 const USERNAME_KEY = 'mazeDodgeUsername';
 
-const SKY_TOP = '#4ea8e8';
-const SKY_HORIZON = '#bfe3f7';
+const SKY_TOP = '#ff8c5a';
+const SKY_HORIZON = '#ffe0b0';
 const MOUNTAIN_LAYERS = [
-  { baseY: 200, amplitude: 40, color: '#8fb8c9', snow: 9 },
-  { baseY: 250, amplitude: 55, color: '#7aa88a', snow: 12 },
-  { baseY: 305, amplitude: 68, color: '#5a9c5e', snow: 15 },
-  { baseY: 365, amplitude: 85, color: '#4a7c4a', snow: 18 },
+  { baseY: 200, amplitude: 40, color: '#c98a6e', snow: 9 },
+  { baseY: 250, amplitude: 55, color: '#b5643f', snow: 12 },
+  { baseY: 305, amplitude: 68, color: '#8f4a2f', snow: 15 },
+  { baseY: 365, amplitude: 85, color: '#6e3624', snow: 18 },
 ];
-const VALLEY_TOP = '#6fbf5f';
-const VALLEY_BOTTOM = '#4e9c4a';
-const RIVER_TOP = '#bfe9f7';
-const RIVER_BOTTOM = '#7fc7e8';
+const VALLEY_TOP = '#d98a3f';
+const VALLEY_BOTTOM = '#a85c2a';
+const RIVER_TOP = '#e8b95a';
+const RIVER_BOTTOM = '#b8791f';
 const GATE_COLOR = '#ffd27f';
 
 const WALK_CYCLE_SPEED = 8;
@@ -134,14 +134,19 @@ const IDLE_ANIM = { facing: { x: 0, y: 1 }, isMoving: false, animPhase: 0 };
 const RUNNER_ANIM = { facing: { x: 1, y: 0 }, isMoving: false, animPhase: 0 };
 
 const NODE_RADIUS = 24;
+// y-values for nodes 3-7 are picked to sit directly on MOUNTAIN_LAYERS' front
+// ridge crest (generateRidgeline(4, 365, 85, 5)'s outline at each x, front
+// layer being the nearest/dominant one) rather than an arbitrary climb into
+// open sky -- nodes 1-2 stay low/in the valley on purpose, matching their
+// "lower lane" flavor text.
 const WORLD_PATH = [
   { x: 110, y: 520 },
   { x: 260, y: 430 },
-  { x: 180, y: 310 },
-  { x: 360, y: 240 },
-  { x: 560, y: 300 },
-  { x: 660, y: 160 },
-  { x: 740, y: 90 },
+  { x: 180, y: 323 },
+  { x: 340, y: 315 },
+  { x: 480, y: 325 },
+  { x: 620, y: 304 },
+  { x: 750, y: 330 },
 ];
 
 // A second, single-node world (see LEVELS[7] below). LEVELS/progress stay one
@@ -860,6 +865,55 @@ function drawPineTree(octx, x, y, size) {
   octx.fillRect(x - 2, y + size * 0.25, 4, size * 0.35);
 }
 
+const AUTUMN_LEAF_PALETTE = ['#d9622b', '#c93f2e', '#e0a52e', '#b8541f'];
+
+function drawAutumnTree(octx, x, y, size, colorSeed) {
+  octx.fillStyle = '#5c3a26';
+  octx.fillRect(x - 2, y + size * 0.25, 4, size * 0.35);
+
+  octx.fillStyle = AUTUMN_LEAF_PALETTE[Math.floor(hashCell(colorSeed, 0, 61) * AUTUMN_LEAF_PALETTE.length)];
+  [
+    [0, -size * 0.9, size * 0.42],
+    [-size * 0.35, -size * 0.6, size * 0.34],
+    [size * 0.35, -size * 0.6, size * 0.34],
+    [0, -size * 0.5, size * 0.4],
+  ].forEach(([dx, dy, r]) => {
+    octx.beginPath();
+    octx.arc(x + dx, y + dy, r, 0, Math.PI * 2);
+    octx.fill();
+  });
+}
+
+function drawMushroom(octx, x, y, size) {
+  octx.fillStyle = '#e8ddc8';
+  octx.fillRect(x - size * 0.12, y, size * 0.24, size * 0.5);
+
+  octx.fillStyle = hashCell(x, y, 71) < 0.5 ? '#c9432e' : '#8a6a3a';
+  octx.beginPath();
+  octx.ellipse(x, y, size * 0.55, size * 0.4, 0, Math.PI, 0);
+  octx.fill();
+
+  octx.fillStyle = '#f5ece0';
+  [[-0.2, -0.08], [0.15, -0.15], [0, -0.25]].forEach(([fx, fy]) => {
+    octx.beginPath();
+    octx.arc(x + fx * size, y + fy * size, size * 0.07, 0, Math.PI * 2);
+    octx.fill();
+  });
+}
+
+function drawFallenLeaf(octx, x, y, size, rotation) {
+  octx.save();
+  octx.translate(x, y);
+  octx.rotate(rotation);
+  octx.fillStyle = AUTUMN_LEAF_PALETTE[Math.floor(hashCell(Math.round(x), Math.round(y), 81) * AUTUMN_LEAF_PALETTE.length)];
+  octx.beginPath();
+  octx.moveTo(0, -size);
+  octx.quadraticCurveTo(size * 0.7, -size * 0.3, 0, size);
+  octx.quadraticCurveTo(-size * 0.7, -size * 0.3, 0, -size);
+  octx.fill();
+  octx.restore();
+}
+
 function buildRiverPath(c) {
   c.beginPath();
   c.moveTo(0, 575);
@@ -930,11 +984,48 @@ function bezierPoint(p0, cp1, cp2, p3, t) {
   };
 }
 
+// The front (nearest/dominant) ridge layer's peaks + saddle midpoints, sans
+// the two canvas-edge base pins -- same seed/params buildMapBackground uses
+// to draw it, so this always matches what's actually on screen.
+function frontRidgePeaks() {
+  const i = MOUNTAIN_LAYERS.length - 1;
+  const layer = MOUNTAIN_LAYERS[i];
+  const { outline } = generateRidgeline(i + 1, layer.baseY, layer.amplitude, 5);
+  return outline.slice(1, -1);
+}
+
+// A Catmull-Rom spline through just the 7 WORLD_PATH nodes cuts straight
+// across whatever peaks/saddles fall between them -- it only guarantees the
+// curve passes through the nodes themselves, not the terrain in between. This
+// splices in the actual ridge points that lie between each pair of
+// consecutive nodes (when both are up on the ridge, not the valley/foot
+// nodes) so the smoothed curve is forced to rise to every peak and dip into
+// every saddle crossed along the way, reading as a road that follows the
+// mountain's surface instead of arcing over it.
+function buildRidgeFollowingPath(path, ridgeBandMaxY = 400) {
+  const peaks = frontRidgePeaks();
+  const out = [path[0]];
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    if (a.y < ridgeBandMaxY && b.y < ridgeBandMaxY) {
+      const lo = Math.min(a.x, b.x);
+      const hi = Math.max(a.x, b.x);
+      const between = peaks.filter((p) => p.x > lo + 1 && p.x < hi - 1);
+      between.sort((p1, p2) => (a.x <= b.x ? p1.x - p2.x : p2.x - p1.x));
+      out.push(...between);
+    }
+    out.push(b);
+  }
+  return out;
+}
+
 function drawTrail(octx, path = WORLD_PATH) {
   if (path.length < 2) return;
+  if (path === WORLD_PATH) path = buildRidgeFollowingPath(path);
   const segments = catmullRomSegments(path);
   octx.save();
-  octx.strokeStyle = 'rgba(122,93,58,0.6)';
+  octx.strokeStyle = 'rgba(90,78,68,0.9)';
   octx.lineWidth = 10;
   octx.lineCap = 'round';
   octx.lineJoin = 'round';
@@ -943,7 +1034,7 @@ function drawTrail(octx, path = WORLD_PATH) {
   segments.forEach((s) => octx.bezierCurveTo(s.cp1.x, s.cp1.y, s.cp2.x, s.cp2.y, s.end.x, s.end.y));
   octx.stroke();
 
-  octx.strokeStyle = '#c9a86a';
+  octx.strokeStyle = '#f0d080';
   octx.lineWidth = 3;
   octx.setLineDash([6, 10]);
   octx.beginPath();
@@ -962,6 +1053,22 @@ function drawTrail(octx, path = WORLD_PATH) {
       octx.fillStyle = '#8a7355';
       octx.beginPath();
       octx.arc(px, py, 2, 0, Math.PI * 2);
+      octx.fill();
+    }
+  });
+
+  // Stone-speckle texture pass, using fresh hash channels (60/61/62) so it
+  // doesn't correlate with the pebble scatter above (channels 50/51/52).
+  segments.forEach((s, seg) => {
+    const p0 = seg === 0 ? path[0] : segments[seg - 1].end;
+    for (let k = 0; k < 5; k++) {
+      const t = hashCell(seg, k, 60);
+      const pt = bezierPoint(p0, s.cp1, s.cp2, s.end, t);
+      const px = pt.x + (hashCell(seg, k, 61) - 0.5) * 9;
+      const py = pt.y + (hashCell(seg, k, 62) - 0.5) * 9;
+      octx.fillStyle = hashCell(seg, k, 63) < 0.5 ? '#a89484' : '#4a4038';
+      octx.beginPath();
+      octx.arc(px, py, 1.2, 0, Math.PI * 2);
       octx.fill();
     }
   });
@@ -991,12 +1098,44 @@ function buildMapBackground() {
     const y = 410 + hashCell(i, 2, 99) * 150;
     const tooClose = WORLD_PATH.some((n) => Math.hypot(n.x - x, n.y - y) < 55);
     if (tooClose) continue;
-    if (hashCell(i, 3, 99) < 0.6) {
-      drawPineTree(octx, x, y, 10 + hashCell(i, 4, 99) * 8);
+    const r = hashCell(i, 3, 99);
+    const size = 10 + hashCell(i, 4, 99) * 8;
+    if (r < 0.35) {
+      drawAutumnTree(octx, x, y, size, i);
+    } else if (r < 0.55) {
+      drawPineTree(octx, x, y, size);
+    } else if (r < 0.75) {
+      drawMushroom(octx, x, y, size * 0.4);
+    } else if (r < 0.9) {
+      drawFallenLeaf(octx, x, y, size * 0.5, hashCell(i, 7, 99) * Math.PI * 2);
     } else {
-      octx.fillStyle = '#5a6b4a';
+      octx.fillStyle = '#8a7d6e';
       octx.beginPath();
       octx.ellipse(x, y, 4 + hashCell(i, 5, 99) * 3, 3, 0, 0, Math.PI * 2);
+      octx.fill();
+    }
+  }
+
+  // A second scatter pass along the ridge/path band, biased toward ground
+  // clutter (mushrooms/leaves/rocks) rather than full trees -- a full-size
+  // tree perched on the ridge crest would visually fight the mountain
+  // silhouette drawRidgeLayer already drew there. Fresh hash seed offset (150
+  // instead of 99) so it doesn't correlate with the valley scatter above.
+  for (let i = 0; i < 25; i++) {
+    const x = hashCell(i, 1, 150) * canvas.width;
+    const y = 250 + hashCell(i, 2, 150) * 150;
+    const tooClose = WORLD_PATH.some((n) => Math.hypot(n.x - x, n.y - y) < 55);
+    if (tooClose) continue;
+    const r = hashCell(i, 3, 150);
+    const size = 8 + hashCell(i, 4, 150) * 6;
+    if (r < 0.4) {
+      drawMushroom(octx, x, y, size * 0.4);
+    } else if (r < 0.8) {
+      drawFallenLeaf(octx, x, y, size * 0.5, hashCell(i, 7, 150) * Math.PI * 2);
+    } else {
+      octx.fillStyle = '#8a7d6e';
+      octx.beginPath();
+      octx.ellipse(x, y, 4 + hashCell(i, 5, 150) * 3, 3, 0, 0, Math.PI * 2);
       octx.fill();
     }
   }
@@ -1892,30 +2031,51 @@ function drawVillageNode(x, y, opts) {
   ctx.save();
   ctx.translate(0, bob);
 
-  const moundColor = locked ? '#4a4640' : completed ? '#7a7058' : '#6b6258';
-  ctx.fillStyle = moundColor;
-  [[-16, -4, 10], [-7, -17, 14], [7, -18, 14], [16, -5, 10], [0, -11, 15]].forEach(([dx, dy, r]) => {
-    ctx.beginPath();
-    ctx.arc(x + dx, y + dy, r, 0, Math.PI * 2);
-    ctx.fill();
-  });
+  // Tower body: tapered polygon (wider base, narrower toward the cap) --
+  // replaces the old cave-mound circle cluster. State colors reused verbatim.
+  const towerColor = locked ? '#4a4640' : completed ? '#7a7058' : '#6b6258';
+  const capColor = locked ? '#38342f' : completed ? '#5c5548' : '#4f473c';
 
+  ctx.fillStyle = towerColor;
+  ctx.beginPath();
+  ctx.moveTo(x - 14, y - 2);
+  ctx.lineTo(x - 8, y - 34);
+  ctx.lineTo(x + 8, y - 34);
+  ctx.lineTo(x + 14, y - 2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Cap: a small flattened trapezoid, a shade darker for a carved-stone look.
+  ctx.fillStyle = capColor;
+  ctx.beginPath();
+  ctx.moveTo(x - 10, y - 32);
+  ctx.lineTo(x - 4, y - 42);
+  ctx.lineTo(x + 4, y - 42);
+  ctx.lineTo(x + 10, y - 32);
+  ctx.closePath();
+  ctx.fill();
+
+  // Carved number recess -- same dark backdrop the old cave doorway used.
   ctx.fillStyle = '#140f0c';
   ctx.beginPath();
   ctx.moveTo(x - 8, y - 1);
-  ctx.lineTo(x - 8, y - 17);
-  ctx.quadraticCurveTo(x - 8, y - 29, x, y - 29);
-  ctx.quadraticCurveTo(x + 8, y - 29, x + 8, y - 17);
+  ctx.lineTo(x - 8, y - 20);
+  ctx.quadraticCurveTo(x - 8, y - 26, x, y - 26);
+  ctx.quadraticCurveTo(x + 8, y - 26, x + 8, y - 20);
   ctx.lineTo(x + 8, y - 1);
   ctx.closePath();
   ctx.fill();
 
   if (locked) {
-    ctx.fillStyle = '#5c5650';
-    [[-4, -5, 4], [3, -8, 4], [0, -2, 3], [-3, -12, 3], [4, -13, 3]].forEach(([dx, dy, r]) => {
+    // Weathering cracks across the tower body -- rubble made sense spilling
+    // out of a cave mouth, not a solid tower, so this replaces it in kind.
+    ctx.strokeStyle = '#5c5650';
+    ctx.lineWidth = 1.4;
+    [[-9, -22, 6, -18], [-3, -10, 5, -14], [2, -6, 9, -12]].forEach(([x1, y1, x2, y2]) => {
       ctx.beginPath();
-      ctx.arc(x + dx, y + dy, r, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(x + x1, y + y1);
+      ctx.lineTo(x + x2, y + y2);
+      ctx.stroke();
     });
   } else {
     ctx.save();
@@ -1931,25 +2091,47 @@ function drawVillageNode(x, y, opts) {
 
   ctx.textAlign = 'center';
   if (locked) {
-    // A locked node still shows its stage number (not a lock icon) -- an
-    // emoji glyph (U+1F512) here previously depended on the browser/OS
-    // having an emoji-capable font fall back for the canvas 'sans-serif'
-    // stack, which isn't guaranteed; missing coverage rendered as a visible
-    // "tofu" box instead of a lock. Plain text has no such dependency.
-    ctx.fillStyle = '#aab0c0';
+    // A vector padlock drawn from plain canvas primitives -- not the U+1F512
+    // emoji glyph, which previously depended on the browser/OS having an
+    // emoji-capable font in the canvas 'sans-serif' fallback stack (not
+    // guaranteed; missing coverage rendered as a visible "tofu" box). Shapes
+    // have no such dependency, so this reads as a lock on every platform.
+    // Icon + number are laid out as one centered group (measured via
+    // ctx.measureText, not hardcoded offsets) so they sit flush together
+    // and stay centered in the badge regardless of digit width.
+    ctx.save();
+    const numText = String(label);
+    const centerY = y + 14;
+    const lockWidth = 8;
+    const gap = 2;
     ctx.font = 'bold 14px sans-serif';
-    ctx.fillText(String(label), x, y + 18);
+    const numWidth = ctx.measureText(numText).width;
+    const startX = x - (lockWidth + gap + numWidth) / 2;
+    const lockCenterX = startX + lockWidth / 2;
+
+    ctx.strokeStyle = '#aab0c0';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(lockCenterX, centerY - 3, 2.6, Math.PI, 0, false);
+    ctx.stroke();
+    ctx.fillStyle = '#aab0c0';
+    ctx.fillRect(lockCenterX - 3, centerY - 3, 6, 5.5);
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(numText, startX + lockWidth + gap, centerY);
+    ctx.restore();
   } else {
     ctx.fillStyle = '#f5f0e0';
     ctx.beginPath();
-    ctx.moveTo(x + 16, y - 32);
-    ctx.lineTo(x + 34, y - 28);
-    ctx.lineTo(x + 16, y - 22);
+    ctx.moveTo(x + 16, y - 45);
+    ctx.lineTo(x + 34, y - 41);
+    ctx.lineTo(x + 16, y - 35);
     ctx.closePath();
     ctx.fill();
     ctx.fillStyle = '#1c1c1c';
     ctx.font = 'bold 12px sans-serif';
-    ctx.fillText(String(label), x + 23, y - 26);
+    ctx.fillText(String(label), x + 23, y - 39);
   }
   ctx.restore();
 }
