@@ -1931,9 +1931,14 @@ function drawVillageNode(x, y, opts) {
 
   ctx.textAlign = 'center';
   if (locked) {
+    // A locked node still shows its stage number (not a lock icon) -- an
+    // emoji glyph (U+1F512) here previously depended on the browser/OS
+    // having an emoji-capable font fall back for the canvas 'sans-serif'
+    // stack, which isn't guaranteed; missing coverage rendered as a visible
+    // "tofu" box instead of a lock. Plain text has no such dependency.
     ctx.fillStyle = '#aab0c0';
-    ctx.font = 'bold 16px sans-serif';
-    ctx.fillText(String.fromCharCode(0x1F512), x, y + 18);
+    ctx.font = 'bold 14px sans-serif';
+    ctx.fillText(String(label), x, y + 18);
   } else {
     ctx.fillStyle = '#f5f0e0';
     ctx.beginPath();
