@@ -173,7 +173,14 @@ function worldIndexForLevel(levelIdx) {
   return 0;
 }
 
+// Legacy single-blob key (pre-per-username progress) -- kept only so
+// migrateLegacyProgressIfNeeded() can attribute an existing player's saved
+// progress to their current username the first time this version runs.
 const PROGRESS_KEY = 'mazeDodgeProgress';
+// Local cache of per-username progress, keyed by progressKeyFor(username) --
+// an offline-tolerant fallback/mirror of the `player_progress` Supabase table
+// (see fetchRemoteProgress/pushRemoteProgress), not the source of truth.
+const PROGRESS_STORE_KEY = 'mazeDodgeProgressByUser';
 
 // Local-only play-session history (this device/browser only, no backend).
 // A "session" is page-open to page-close/idle: currentSession.lastActiveAt
@@ -527,24 +534,147 @@ function ensureProgressShape(p) {
   return p;
 }
 
-function loadProgress() {
+function defaultProgress() {
+  return ensureProgressShape({ unlockedIndex: 0, completedLevels: LEVELS.map(() => false) });
+}
+
+// --- remote sync (player_progress table -- same Supabase project/creds the
+// leaderboard already uses, upsert-by-username instead of insert-only) -----
+
+function progressToRemoteRow(name, p) {
+  return {
+    username: name,
+    unlocked_index: p.unlockedIndex,
+    completed_levels: p.completedLevels,
+    best_times: p.bestTimes,
+    gems_collected: p.gemsCollected,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function remoteRowToProgress(row) {
+  return ensureProgressShape({
+    unlockedIndex: row.unlocked_index,
+    completedLevels: row.completed_levels,
+    bestTimes: row.best_times,
+    gemsCollected: row.gems_collected,
+  });
+}
+
+async function fetchRemoteProgress(name) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
   try {
-    const raw = localStorage.getItem(PROGRESS_KEY);
-    if (!raw) throw new Error('no progress');
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.unlockedIndex !== 'number' || !Array.isArray(parsed.completedLevels)) throw new Error('bad shape');
-    return ensureProgressShape(parsed);
+    const url = `${SUPABASE_URL}/rest/v1/player_progress?username=eq.${encodeURIComponent(name)}&limit=1`;
+    const res = await fetch(url, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+    });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows.length > 0 ? remoteRowToProgress(rows[0]) : null;
   } catch (e) {
-    return ensureProgressShape({ unlockedIndex: 0, completedLevels: LEVELS.map(() => false) });
+    return null;
   }
 }
 
-function saveProgress() {
-  localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
+// Fire-and-forget, same pattern as submitScore() -- the local cache (below)
+// is what actually guarantees progress survives a failed/offline push.
+function pushRemoteProgress(name, p) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !name) return;
+  fetch(`${SUPABASE_URL}/rest/v1/player_progress`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      Prefer: 'resolution=merge-duplicates',
+    },
+    body: JSON.stringify(progressToRemoteRow(name, p)),
+  }).catch(() => {});
 }
 
-let progress = loadProgress();
+// --- local cache (offline fallback + instant boot) -------------------------
+
+function progressKeyFor(name) {
+  return (name || '').trim().toLowerCase();
+}
+
+function loadProgressStore() {
+  try {
+    const raw = localStorage.getItem(PROGRESS_STORE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveProgressStore(store) {
+  localStorage.setItem(PROGRESS_STORE_KEY, JSON.stringify(store));
+}
+
+function loadProgressForUser(name) {
+  const store = loadProgressStore();
+  const existing = store[progressKeyFor(name)];
+  if (existing && typeof existing.unlockedIndex === 'number' && Array.isArray(existing.completedLevels)) {
+    return ensureProgressShape(existing);
+  }
+  return defaultProgress();
+}
+
+function cacheProgressForUser(name, p) {
+  const store = loadProgressStore();
+  store[progressKeyFor(name)] = p;
+  saveProgressStore(store);
+}
+
+// Saves the active user's progress: local cache (durable, offline-safe)
+// plus a best-effort remote push -- the local cache is the real safety net,
+// the remote push is what makes it available on another device.
+function saveProgress() {
+  cacheProgressForUser(username, progress);
+  pushRemoteProgress(username, progress);
+}
+
+// One-time migration from the old single-blob storage: if the per-user store
+// is empty but the legacy flat key has data and a username is already set,
+// attribute that legacy progress to it -- both locally and (best-effort)
+// remotely -- so it becomes available cross-device going forward instead of
+// silently starting over the first time this version runs.
+function migrateLegacyProgressIfNeeded() {
+  if (Object.keys(loadProgressStore()).length > 0) return;
+  if (!username) return;
+  try {
+    const raw = localStorage.getItem(PROGRESS_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.unlockedIndex !== 'number' || !Array.isArray(parsed.completedLevels)) return;
+    const migrated = ensureProgressShape(parsed);
+    cacheProgressForUser(username, migrated);
+    pushRemoteProgress(username, migrated);
+  } catch (e) {
+    // Nothing usable to migrate -- loadProgressForUser() falls back to fresh defaults.
+  }
+}
+
+// Fire-and-forget top-up: game.js is a plain <script> (not type="module"), so
+// there's no top-level `await` available to block boot on a network
+// round-trip. This runs after the instant, local-cache-based `progress` is
+// already in place, swapping in remote data a moment later if it's reachable
+// and present. The explicit "switch user" flow (saveUsername) properly
+// awaits instead, since that runs inside an async event handler rather than
+// at top-level script execution.
+async function refreshProgressFromRemote(name) {
+  const remote = await fetchRemoteProgress(name);
+  if (!remote || name !== username) return; // stale response for a since-superseded user
+  progress = remote;
+  cacheProgressForUser(name, progress);
+  viewedWorldIndex = worldIndexForLevel(Math.min(progress.unlockedIndex, LEVELS.length - 1));
+}
+
 let username = localStorage.getItem(USERNAME_KEY) || '';
+migrateLegacyProgressIfNeeded();
+let progress = loadProgressForUser(username);
+if (username) refreshProgressFromRemote(username);
 
 function loadSessions() {
   try {
@@ -2576,12 +2706,32 @@ analyticsCloseBtn.addEventListener('click', () => {
   analyticsScreen.classList.add('hidden');
 });
 
-function saveUsername(name) {
-  // A real rename (not first-time setup) splits into a new session instead
-  // of relabeling currentSession in place -- it's a live reference already
-  // sitting in `sessions`, so mutating its username would retroactively
-  // rewrite time already accumulated under the old name to the new one.
-  if (username && username !== name) {
+// Fetches/adopts `name`'s progress (preferring synced remote data, falling
+// back to whatever's cached locally or fresh defaults if offline) and points
+// the module-level `progress`/`viewedWorldIndex` bindings at it. Reassigning
+// those bindings is enough -- every read site (enterLevel, finishLevel,
+// renderWorldScene, etc.) references the free variable directly, not a
+// captured copy.
+async function adoptProgressFor(name) {
+  const remote = await fetchRemoteProgress(name);
+  progress = remote || loadProgressForUser(name);
+  cacheProgressForUser(name, progress);
+  viewedWorldIndex = worldIndexForLevel(Math.min(progress.unlockedIndex, LEVELS.length - 1));
+}
+
+async function saveUsername(name) {
+  const isRename = username && username !== name;
+  // First-time setup (no username yet in this browser) still needs a
+  // progress fetch, not just a rename -- this may be a returning player
+  // setting up on a brand-new device, which is the whole point of syncing
+  // progress remotely rather than only within one browser's localStorage.
+  const isFirstTimeSetup = !username;
+
+  if (isRename) {
+    // A real rename splits into a new session instead of relabeling
+    // currentSession in place -- it's a live reference already sitting in
+    // `sessions`, so mutating its username would retroactively rewrite time
+    // already accumulated under the old name to the new one.
     currentSession.lastActiveAt = Date.now();
     currentSession = {
       username: name,
@@ -2590,7 +2740,17 @@ function saveUsername(name) {
       stagesCompleted: 0,
     };
     sessions.push(currentSession);
+
+    // Persist the outgoing user's progress before adopting the incoming
+    // one's -- keys off the still-current `username`, so this must run
+    // before it's reassigned below.
+    saveProgress();
+    await adoptProgressFor(name);
+  } else if (isFirstTimeSetup) {
+    currentSession.username = name;
+    await adoptProgressFor(name);
   } else {
+    // Re-saving the same name -- no actual change, nothing to swap.
     currentSession.username = name;
   }
   username = name;
@@ -2626,8 +2786,8 @@ async function isUsernameTaken(name) {
 let usernameFlowMode = 'setup';
 let pendingUsername = '';
 
-function finishUsernameFlow(name) {
-  saveUsername(name);
+async function finishUsernameFlow(name) {
+  await saveUsername(name);
   usernameScreen.classList.add('hidden');
   if (usernameFlowMode === 'setup') {
     startScreen.classList.remove('hidden');
@@ -2643,25 +2803,30 @@ usernameContinueBtn.addEventListener('click', async () => {
   usernameError.classList.add('hidden');
   if (trimmed === username) {
     // No actual change -- skip the network round-trip, nothing to check.
-    finishUsernameFlow(trimmed);
+    await finishUsernameFlow(trimmed);
     return;
   }
   usernameContinueBtn.disabled = true;
   const taken = await isUsernameTaken(trimmed);
-  usernameContinueBtn.disabled = false;
   if (taken) {
+    usernameContinueBtn.disabled = false;
     pendingUsername = trimmed;
     usernameTakenText.textContent = `"${trimmed}" is already taken. Use it anyway?`;
     usernameScreen.classList.add('hidden');
     usernameTakenScreen.classList.remove('hidden');
     return;
   }
-  finishUsernameFlow(trimmed);
+  // Still disabled through finishUsernameFlow -- it awaits the progress sync
+  // (fetchRemoteProgress), a second network round-trip after isUsernameTaken.
+  await finishUsernameFlow(trimmed);
+  usernameContinueBtn.disabled = false;
 });
 
-usernameTakenYesBtn.addEventListener('click', () => {
+usernameTakenYesBtn.addEventListener('click', async () => {
+  usernameTakenYesBtn.disabled = true;
   usernameTakenScreen.classList.add('hidden');
-  finishUsernameFlow(pendingUsername);
+  await finishUsernameFlow(pendingUsername);
+  usernameTakenYesBtn.disabled = false;
 });
 
 usernameTakenNoBtn.addEventListener('click', () => {
