@@ -32,6 +32,11 @@ const analyticsBtn = document.getElementById('analyticsBtn');
 const analyticsScreen = document.getElementById('analyticsScreen');
 const analyticsList = document.getElementById('analyticsList');
 const analyticsCloseBtn = document.getElementById('analyticsCloseBtn');
+const shopBtn = document.getElementById('shopBtn');
+const shopScreen = document.getElementById('shopScreen');
+const shopBalance = document.getElementById('shopBalance');
+const shopList = document.getElementById('shopList');
+const shopCloseBtn = document.getElementById('shopCloseBtn');
 
 const Phase = { START: 'start', MENU: 'menu', TRANSFORM_IN: 'transform_in', PLAYING: 'playing', TRANSFORM_OUT: 'transform_out', PAUSED: 'paused' };
 let phase = Phase.START;
@@ -521,6 +526,23 @@ function ensureProgressShape(p) {
 
   while (p.completedLevels.length < LEVELS.length) p.completedLevels.push(false);
 
+  // Gem-shop state. Deliberately doesn't cross-check against SKINS here --
+  // SKINS is declared later in the file (well after boot calls into this
+  // function), so this only validates shape/type; getSkin()'s existing
+  // SKINS[currentSkin] || SKINS.default fallback is what actually guards
+  // against an unknown/removed skin id at render time.
+  if (!Array.isArray(p.ownedSkins)) p.ownedSkins = [];
+  p.ownedSkins = p.ownedSkins.filter((s) => typeof s === 'string');
+  if (!p.ownedSkins.includes('default')) p.ownedSkins.push('default');
+
+  if (typeof p.selectedSkin !== 'string' || !p.ownedSkins.includes(p.selectedSkin)) {
+    p.selectedSkin = 'default';
+  }
+
+  if (typeof p.gemsSpent !== 'number' || !isFinite(p.gemsSpent) || p.gemsSpent < 0) {
+    p.gemsSpent = 0;
+  }
+
   // One-time fix for saves from before LEVELS grew: unlockedIndex was capped by the
   // old (shorter) LEVELS.length, so a player who'd already beaten the old last level
   // would otherwise need a needless replay to unlock the new one(s).
@@ -538,6 +560,14 @@ function defaultProgress() {
   return ensureProgressShape({ unlockedIndex: 0, completedLevels: LEVELS.map(() => false) });
 }
 
+// Gems ever collected (an achievement stat, unaffected by shop spending) --
+// shared by the HUD display and the shop's spendable-balance calculation
+// (availableGems = lifetimeGemTotal() - progress.gemsSpent) so both always
+// agree on what "collected" means.
+function lifetimeGemTotal() {
+  return progress.gemsCollected.reduce((sum, arr) => sum + arr.filter(Boolean).length, 0);
+}
+
 // --- remote sync (player_progress table -- same Supabase project/creds the
 // leaderboard already uses, upsert-by-username instead of insert-only) -----
 
@@ -548,6 +578,9 @@ function progressToRemoteRow(name, p) {
     completed_levels: p.completedLevels,
     best_times: p.bestTimes,
     gems_collected: p.gemsCollected,
+    owned_skins: p.ownedSkins,
+    selected_skin: p.selectedSkin,
+    gems_spent: p.gemsSpent,
     updated_at: new Date().toISOString(),
   };
 }
@@ -558,6 +591,9 @@ function remoteRowToProgress(row) {
     completedLevels: row.completed_levels,
     bestTimes: row.best_times,
     gemsCollected: row.gems_collected,
+    ownedSkins: row.owned_skins,
+    selectedSkin: row.selected_skin,
+    gemsSpent: row.gems_spent,
   });
 }
 
@@ -669,6 +705,7 @@ async function refreshProgressFromRemote(name) {
   progress = remote;
   cacheProgressForUser(name, progress);
   viewedWorldIndex = worldIndexForLevel(Math.min(progress.unlockedIndex, LEVELS.length - 1));
+  currentSkin = progress.selectedSkin;
 }
 
 let username = localStorage.getItem(USERNAME_KEY) || '';
@@ -869,6 +906,7 @@ beginBtn.addEventListener('click', () => {
   leaderboardBtn.classList.remove('hidden');
   usernameBtn.classList.remove('hidden');
   analyticsBtn.classList.remove('hidden');
+  shopBtn.classList.remove('hidden');
 });
 
 resumeBtn.addEventListener('click', () => {
@@ -1626,6 +1664,7 @@ function enterLevel(index) {
   leaderboardBtn.classList.add('hidden');
   usernameBtn.classList.add('hidden');
   analyticsBtn.classList.add('hidden');
+  shopBtn.classList.add('hidden');
 }
 
 function respawnInLevel() {
@@ -1992,18 +2031,33 @@ function update(dt) {
       leaderboardBtn.classList.remove('hidden');
       usernameBtn.classList.remove('hidden');
       analyticsBtn.classList.remove('hidden');
+      shopBtn.classList.remove('hidden');
     }
   }
 }
 
-// Skin plumbing: one skin defined today ("the usual person"), but every
-// color drawCharacter uses is read from this object instead of hardcoded
-// literals so a future skin-select feature only needs to add entries here
-// and set currentSkin -- no drawCharacter changes.
+// Skin plumbing: every color drawCharacter uses is read from this object
+// instead of hardcoded literals, so the gem shop only needs to add entries
+// here and set currentSkin -- no drawCharacter changes. `default` is free
+// and always owned; the rest are purchasable via progress.gemsSpent/
+// ownedSkins (see the shop functions below) at the cost in SKIN_COSTS.
 const SKINS = {
   default: { legs: '#2e4a6b', torso: '#3a6ea8', head: '#f0c090', orb: '#7fd6ff' },
+  ash: { legs: '#4a4a4a', torso: '#6b6b6b', head: '#d8c8b8', orb: '#c8c8d8' },
+  ember: { legs: '#6b2e1a', torso: '#c9432e', head: '#f0c090', orb: '#ff9a4a' },
+  cavern: { legs: '#2a1e4a', torso: '#4a3a7a', head: '#e0c8a0', orb: '#9a7fff' },
+  golden: { legs: '#6b5a1a', torso: '#d4af37', head: '#f5e0b0', orb: '#ffe680' },
 };
-let currentSkin = 'default';
+const SKIN_COSTS = { ash: 5, ember: 10, cavern: 15, golden: 25 };
+const SKIN_NAMES = { default: 'Traveler', ash: 'Ashwalker', ember: 'Ember', cavern: 'Cavern', golden: 'Golden' };
+
+// currentSkin mirrors progress.selectedSkin (per-username state, like
+// everything else in progress). `progress` is already resolved by the time
+// this line runs (declared earlier, well before this point in the script),
+// same reasoning refreshProgressFromRemote()'s post-await continuation
+// relies on for viewedWorldIndex -- reassigned again there and in
+// adoptProgressFor() whenever the active user/progress switches.
+let currentSkin = progress.selectedSkin;
 function getSkin() {
   return SKINS[currentSkin] || SKINS.default;
 }
@@ -2424,7 +2478,7 @@ function renderMenu() {
   ctx.fillText(world.name, canvas.width / 2, 46);
   ctx.restore();
 
-  const gemTotal = progress.gemsCollected.reduce((sum, arr) => sum + arr.filter(Boolean).length, 0);
+  const gemTotal = lifetimeGemTotal();
   ctx.save();
   ctx.textAlign = 'right';
   ctx.fillStyle = GEM_COLOR;
@@ -2706,6 +2760,83 @@ analyticsCloseBtn.addEventListener('click', () => {
   analyticsScreen.classList.add('hidden');
 });
 
+function renderShopList() {
+  const available = lifetimeGemTotal() - progress.gemsSpent;
+  shopBalance.textContent = `♦ ${available} gems`;
+  shopList.innerHTML = '';
+  Object.keys(SKINS).forEach((id) => {
+    const row = document.createElement('div');
+    row.className = 'shopRow';
+
+    const swatches = document.createElement('div');
+    swatches.className = 'shopSwatches';
+    ['legs', 'torso', 'head', 'orb'].forEach((part) => {
+      const sw = document.createElement('div');
+      sw.className = 'shopSwatch';
+      sw.style.background = SKINS[id][part];
+      swatches.appendChild(sw);
+    });
+
+    const name = document.createElement('div');
+    name.className = 'shopName';
+    name.textContent = SKIN_NAMES[id] || id;
+
+    const btn = document.createElement('button');
+    btn.className = 'shopAction';
+    const owned = progress.ownedSkins.includes(id);
+    const equipped = progress.selectedSkin === id;
+    if (equipped) {
+      btn.textContent = 'Equipped';
+      btn.classList.add('equipped');
+      btn.disabled = true;
+    } else if (owned) {
+      btn.textContent = 'Equip';
+      btn.addEventListener('click', () => equipSkin(id));
+    } else {
+      const cost = SKIN_COSTS[id] || 0;
+      btn.textContent = `Buy for ${cost}`;
+      btn.disabled = available < cost;
+      btn.addEventListener('click', () => buySkin(id));
+    }
+
+    row.appendChild(swatches);
+    row.appendChild(name);
+    row.appendChild(btn);
+    shopList.appendChild(row);
+  });
+}
+
+// Re-verifies affordability/ownership against live progress rather than
+// trusting whatever the button's disabled state showed when clicked --
+// closes any gap from stale UI state (e.g. two rapid clicks).
+function buySkin(id) {
+  const cost = SKIN_COSTS[id] || 0;
+  const available = lifetimeGemTotal() - progress.gemsSpent;
+  if (progress.ownedSkins.includes(id) || available < cost) return;
+  progress.ownedSkins.push(id);
+  progress.gemsSpent += cost;
+  saveProgress();
+  renderShopList();
+}
+
+function equipSkin(id) {
+  if (!progress.ownedSkins.includes(id)) return;
+  progress.selectedSkin = id;
+  currentSkin = id;
+  saveProgress();
+  renderShopList();
+}
+
+function openShop() {
+  shopScreen.classList.remove('hidden');
+  renderShopList();
+}
+
+shopBtn.addEventListener('click', openShop);
+shopCloseBtn.addEventListener('click', () => {
+  shopScreen.classList.add('hidden');
+});
+
 // Fetches/adopts `name`'s progress (preferring synced remote data, falling
 // back to whatever's cached locally or fresh defaults if offline) and points
 // the module-level `progress`/`viewedWorldIndex` bindings at it. Reassigning
@@ -2717,6 +2848,7 @@ async function adoptProgressFor(name) {
   progress = remote || loadProgressForUser(name);
   cacheProgressForUser(name, progress);
   viewedWorldIndex = worldIndexForLevel(Math.min(progress.unlockedIndex, LEVELS.length - 1));
+  currentSkin = progress.selectedSkin;
 }
 
 async function saveUsername(name) {
