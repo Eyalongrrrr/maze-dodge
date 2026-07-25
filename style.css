@@ -228,6 +228,93 @@ canvas {
   font-size: 0.9em;
 }
 
+#shopBtn {
+  position: absolute;
+  top: 144px;
+  left: 12px;
+  padding: 8px 16px;
+  font-size: 0.9em;
+  border: none;
+  border-radius: 6px;
+  background: rgba(63, 169, 245, 0.85);
+  color: #08111d;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#shopBtn:hover {
+  background: #63bcff;
+}
+
+#shopList {
+  min-width: 360px;
+  max-width: 480px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  padding: 10px 16px;
+}
+
+.shopRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.shopRow:last-child {
+  border-bottom: none;
+}
+
+.shopSwatches {
+  display: flex;
+  gap: 4px;
+}
+
+.shopSwatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.shopName {
+  flex: 1;
+  text-align: left;
+  color: #e8ecf4;
+  font-weight: 600;
+}
+
+.shopAction {
+  padding: 6px 14px;
+  font-size: 0.85em;
+  border: none;
+  border-radius: 6px;
+  background: #3fa9f5;
+  color: #08111d;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.shopAction:hover {
+  background: #63bcff;
+}
+
+.shopAction:disabled {
+  background: #2c3550;
+  color: #7a8299;
+  cursor: default;
+}
+
+.shopAction.equipped {
+  background: #4a7c4a;
+  color: #eafbea;
+  cursor: default;
+}
+
 .btnRow {
   display: flex;
   gap: 12px;
